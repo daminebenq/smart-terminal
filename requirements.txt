@@ -1,0 +1,10 @@
+requests
+prompt_toolkit
+python-dotenv
+ddgs
+diskcache
+beautifulsoup4
+trafilatura
+playwright
+selenium
+pytest

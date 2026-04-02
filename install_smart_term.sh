@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Install smart-term wrapper into /usr/local/bin
+set -euo pipefail
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC="$SRC_DIR/smart-term"
+CLI_ABS="$SRC_DIR/cli.py"
+if [ ! -f "$CLI_ABS" ]; then
+  echo "cli.py not found in project root ($CLI_ABS). Aborting."
+  exit 1
+fi
+if [ ! -f "$SRC" ]; then
+  echo "smart-term wrapper not found in $SRC"
+  exit 1
+fi
+
+# Prefer system-wide install to /usr/local/bin; fall back to ~/.local/bin when sudo is not available
+SYSTEM_DST="/usr/local/bin/smart-term"
+USER_BIN="$HOME/.local/bin"
+mkdir -p "$USER_BIN"
+
+echo "Attempting system install to $SYSTEM_DST (requires write or sudo)..."
+LAUNCHER_CONTENT=$(cat <<EOF
+#!/usr/bin/env bash
+exec python3 "$CLI_ABS" "\$@"
+EOF
+)
+
+if printf "%s" "$LAUNCHER_CONTENT" > "$SYSTEM_DST" 2>/dev/null; then
+  chmod a+rx "$SYSTEM_DST"
+  DST="$SYSTEM_DST"
+else
+  if command -v sudo >/dev/null 2>&1; then
+    echo "System write failed; trying with sudo to write launcher..."
+    tmpf=$(mktemp)
+    printf "%s" "$LAUNCHER_CONTENT" > "$tmpf"
+    if sudo mv "$tmpf" "$SYSTEM_DST" && sudo chmod a+rx "$SYSTEM_DST"; then
+      DST="$SYSTEM_DST"
+    else
+      echo "sudo install failed; falling back to user install at $USER_BIN"
+      DST="$USER_BIN/smart-term"
+      printf "%s" "$LAUNCHER_CONTENT" > "$DST"
+      chmod a+rx "$DST"
+    fi
+  else
+    echo "No sudo available; installing launcher to $USER_BIN"
+    DST="$USER_BIN/smart-term"
+    printf "%s" "$LAUNCHER_CONTENT" > "$DST"
+    chmod a+rx "$DST"
+  fi
+fi
+
+# Create convenience wrappers that forward to smart-term. They will invoke the CLI with the trigger as the first arg.
+for name in st term do web_search web_fetch web_scrape; do
+  # prefer system wrappers location if we installed system-wide, otherwise place in user bin
+  if [ "$DST" = "$SYSTEM_DST" ]; then
+    WRAPPER_DIR="/usr/local/bin"
+    if [ -w "$WRAPPER_DIR" ] || command -v sudo >/dev/null 2>&1; then
+      WRAPPER_PATH="$WRAPPER_DIR/$name"
+      tmpfile=$(mktemp)
+      # Create wrapper that forwards the trigger name WITHOUT a leading '!' to avoid zsh history expansion.
+      cat > "$tmpfile" <<EOF
+#!/usr/bin/env bash
+exec "$DST" "${name}" "\$@"
+EOF
+      if [ -w "$WRAPPER_DIR" ]; then
+        mv "$tmpfile" "$WRAPPER_PATH"
+        chmod a+rx "$WRAPPER_PATH"
+      else
+        sudo mv "$tmpfile" "$WRAPPER_PATH"
+        sudo chmod a+rx "$WRAPPER_PATH"
+      fi
+    fi
+  else
+    WRAPPER_PATH="$USER_BIN/$name"
+    # Create wrapper that forwards the trigger name without leading '!'
+    cat > "$WRAPPER_PATH" <<EOF
+#!/usr/bin/env bash
+exec "$DST" "${name}" "$@"
+EOF
+    chmod a+rx "$WRAPPER_PATH"
+  fi
+done
+
+echo "Installed. smart-term at: $DST"
+if [ "$DST" != "$SYSTEM_DST" ]; then
+  echo "Added wrappers into $USER_BIN. Ensure $USER_BIN is in your PATH, e.g.:"
+  echo '  export PATH="$HOME/.local/bin:$PATH"'
+fi
+echo "Available commands: smart-term, term, do, web_search, web_fetch, web_scrape"

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Convenience wrapper to call the smart terminal CLI
+PYTHON=${PYTHON:-python3}
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# Logging for single-shot wrapper invocations. Interactive mode (no args) remains untouched.
+LOG_DIR=${SMART_TERM_LOG_DIR:-"$HOME/.local/share/smart-terminal/logs"}
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +%Y%m%dT%H%M%S)
+NAME=$(basename "$0")
+LOGFILE="$LOG_DIR/${NAME}-$TIMESTAMP.log"
+
+if [ "$#" -gt 0 ]; then
+	# For single-shot invocations (wrappers forward triggers like '!web_search'), capture stdout+stderr to a log
+	exec "$PYTHON" "$DIR/cli.py" "$@" 2>&1 | tee -a "$LOGFILE"
+else
+	# interactive: don't pipe through tee to preserve terminal behavior
+	exec "$PYTHON" "$DIR/cli.py" "$@"
+fi
