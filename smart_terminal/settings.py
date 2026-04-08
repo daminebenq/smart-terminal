@@ -26,12 +26,12 @@ def _load_global_config() -> Dict[str, str]:
 
 class SettingsManager:
     def __init__(self):
-        # Start with global config as base, then overlay env vars (env wins)
+        # Global config (from setup wizard) takes precedence over env vars
         global_cfg = _load_global_config()
         self._data: Dict[str, Any] = {
-            'OLLAMA_API_BASE': os.getenv('OLLAMA_API_BASE', '') or global_cfg.get('OLLAMA_API_BASE', ''),
-            'OLLAMA_MODEL': os.getenv('OLLAMA_MODEL', '') or global_cfg.get('OLLAMA_MODEL', ''),
-            'OLLAMA_API_KEY': os.getenv('OLLAMA_API_KEY', '') or global_cfg.get('OLLAMA_API_KEY', ''),
+            'OLLAMA_API_BASE': global_cfg.get('OLLAMA_API_BASE', '') or os.getenv('OLLAMA_API_BASE', ''),
+            'OLLAMA_MODEL': global_cfg.get('OLLAMA_MODEL', '') or os.getenv('OLLAMA_MODEL', ''),
+            'OLLAMA_API_KEY': global_cfg.get('OLLAMA_API_KEY', '') or os.getenv('OLLAMA_API_KEY', ''),
             # behavior toggles
             'AUTO_APPROVE_ZERO_RISK': os.getenv('AUTO_APPROVE_ZERO_RISK', 'true'),
             'AUTO_APPROVE_LOW_RISK_THRESHOLD': os.getenv('AUTO_APPROVE_LOW_RISK_THRESHOLD', '20'),
