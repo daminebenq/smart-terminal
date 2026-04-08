@@ -2,7 +2,8 @@ import os
 import json
 from typing import Dict, Any, Optional
 
-CONFIG_PATH = os.path.join(os.getcwd(), '.smart_terminal_config.json')
+# Moved from os.getcwd() to user home directory to make configuration global
+CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.smart-terminal-config', 'settings.json')
 
 # Global config written by first-run setup
 _GLOBAL_CONFIG_FILE = os.path.join(os.path.expanduser('~'), '.smart-terminal-config', 'config.json')
@@ -54,6 +55,8 @@ class SettingsManager:
             pass
 
     def save(self):
+        # Ensure the directory exists before saving the global settings file
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, 'w') as f:
             json.dump(self._data, f, indent=2)
 
