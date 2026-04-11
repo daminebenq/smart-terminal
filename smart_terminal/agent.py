@@ -469,8 +469,9 @@ User question: {instruction}
                 if self._assess_risk([cmd]) > 30:
                     continue
                 try:
+                    shell_cmd = ['cmd', '/c', cmd] if self.detected_os == 'windows' else ['zsh', '-lc', cmd]
                     res = subprocess.run(
-                        ['zsh', '-lc', cmd],
+                        shell_cmd,
                         capture_output=True, text=True, timeout=15
                     )
                     output = (res.stdout + res.stderr).strip()
@@ -1209,7 +1210,14 @@ User question: {instruction}
         if re.search(r"what\s+is\s+my\s+os|which\s+os|what\s+is\s+my\s+operating\s+system", s):
             # Provide quick local OS info without model call
             try:
-                if self.detected_os == 'macos':
+                if self.detected_os == 'windows':
+                    out = subprocess.check_output(
+                        ['cmd', '/c', 'ver'],
+                        text=True, stderr=subprocess.STDOUT
+                    )
+                    print(out.strip())
+                    print(f'Platform: {platform.platform()}')
+                elif self.detected_os == 'macos':
                     # run sw_vers for detailed macOS info
                     out = subprocess.check_output(['sw_vers'], text=True, stderr=subprocess.STDOUT)
                     print(out)
@@ -1292,8 +1300,10 @@ User question: {instruction}
         return final
 
     def _detect_os(self) -> str:
-        """Return a simple OS identifier: 'macos', 'debian', 'redhat', 'arch', or 'unknown'."""
+        """Return a simple OS identifier: 'windows', 'macos', 'debian', 'redhat', 'arch', or 'unknown'."""
         sysname = platform.system().lower()
+        if sysname == 'windows':
+            return 'windows'
         if sysname == 'darwin':
             return 'macos'
         if sysname == 'linux':
@@ -1329,6 +1339,12 @@ User question: {instruction}
                 issues.append(f"Command '{c}' uses brew but host is {osid}")
             if re.search(r"\bpacman\b", lc) and osid != 'arch':
                 issues.append(f"Command '{c}' uses pacman but host is {osid}")
+            if re.search(r"\bsudo\b", lc) and osid == 'windows':
+                issues.append(f"Command '{c}' uses sudo but host is Windows (use elevated shell or gsudo)")
+            if re.search(r"\bapt\b|apt-get\b|dpkg\b|yum\b|dnf\b|rpm\b|pacman\b", lc) and osid == 'windows':
+                issues.append(f"Command '{c}' uses a Linux package manager but host is Windows")
+            if re.search(r"\bchoco\b|\bwinget\b|\bscoop\b", lc) and osid not in ('windows',):
+                issues.append(f"Command '{c}' uses a Windows package manager but host is {osid}")
         return issues
 
     # --- Wikidata extraction helpers (unit-testable) ---
@@ -1509,8 +1525,10 @@ User question: {instruction}
 
             try:
                 # For interactive commands (sudo, password prompts), inherit the terminal so prompts work.
-                # Use zsh -lc to keep consistent shell behavior.
-                res = subprocess.run(['zsh', '-lc', c])
+                if self.detected_os == 'windows':
+                    res = subprocess.run(['cmd', '/c', c])
+                else:
+                    res = subprocess.run(['zsh', '-lc', c])
                 logging.info('Exit %s', res.returncode)
                 if hint:
                     print('[hint]', hint)
