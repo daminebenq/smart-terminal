@@ -85,15 +85,16 @@ def main():
     base = os.getenv("OLLAMA_API_BASE")
     model = os.getenv("OLLAMA_MODEL")
 
-    # Handle 'configure' / 'reconfigure' as any argument position
-    # e.g. smart-term configure, web_search configure, term reconfigure
-    argv_lower = [a.lower().lstrip('!:') for a in sys.argv[1:]]
-    if 'reconfigure' in argv_lower:
-        run_reconfigure()
-        return
-    if 'configure' in argv_lower:
-        run_setup()
-        return
+    # Handle 'configure' / 'reconfigure' only as the first argument
+    # e.g. smart-term configure, smart-term reconfigure
+    if len(sys.argv) > 1:
+        first_arg = sys.argv[1].lower().lstrip('!:')
+        if first_arg == 'reconfigure':
+            run_reconfigure()
+            return
+        if first_arg == 'configure':
+            run_setup()
+            return
 
     # Support a simple maintenance flag to clear caches used by the agent
     if '--clear-cache' in sys.argv:
@@ -112,11 +113,22 @@ def main():
 
     settings = SettingsManager()
 
-    # Only print the interactive header when running without single-shot args
-    if len(sys.argv) == 1:
-        print("Smart Terminal prototype — type '!term <instruction>' or '!do <instruction>'")
-        print("Type ':models' to list available models from the Ollama API, ':settings' to view, ':set model <name>' to change model")
-        print("Type 'exit' or Ctrl-C to quit.")
+    # ── Chat mode (Claude CLI / Codex CLI style) ──
+    # Default behavior: `smart-term` with no args starts continuous chat.
+    # Explicit: `smart-term chat` or `smart-term resume`.
+    first_arg_lower = sys.argv[1].lower().lstrip('!:') if len(sys.argv) > 1 else ''
+    want_chat = (len(sys.argv) == 1) or first_arg_lower in ('chat', 'resume')
+    if want_chat:
+        from smart_terminal.chat import run_chat
+        base_url = settings.get('OLLAMA_API_BASE') or base
+        model_name = settings.get('OLLAMA_MODEL') or model
+        if not (base_url and model_name):
+            print("API base / model not configured. Run: smart-term configure")
+            return
+        agent = TerminalAgent(api_base=base_url, model=model_name)
+        resume = (first_arg_lower == 'resume')
+        sys.exit(run_chat(agent, resume=resume))
+        return
 
     # session-level auto-approve flags toggled by shortcuts
     session_auto_low = False

@@ -39,3 +39,4 @@ database.db-wal
 # Project folders not needed for runtime
 coda/
 workshop/
+.aider*

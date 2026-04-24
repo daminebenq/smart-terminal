@@ -440,6 +440,120 @@ User question: {instruction}
         resp = self._call_ollama(prompt)
         return resp.strip()
 
+    def chat_with_history(self, messages: list, stream: bool = True,
+                          on_token=None) -> str:
+        """Multi-turn chat using Ollama /api/chat (messages array).
+
+        Args:
+            messages: list of {role, content} dicts (system/user/assistant).
+            stream: if True, stream tokens via on_token callback.
+            on_token: callback(token: str) invoked for each streamed chunk.
+
+        Returns the full assistant response text, or '' on failure.
+        """
+        url = f"{self.api_base}/api/chat"
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": bool(stream),
+        }
+        headers = {'Content-Type': 'application/json'}
+        if self.api_key:
+            headers['Authorization'] = f'Bearer {self.api_key}'
+
+        try:
+            if stream:
+                r = self.session.post(url, json=payload, headers=headers,
+                                      timeout=300, stream=True)
+                r.raise_for_status()
+                acc = []
+                for raw_line in r.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    try:
+                        j = json.loads(raw_line)
+                    except Exception:
+                        continue
+                    # Ollama /api/chat streams {"message":{"role":"assistant","content":"..."}}
+                    msg = j.get('message') if isinstance(j, dict) else None
+                    chunk = ''
+                    if isinstance(msg, dict):
+                        chunk = msg.get('content', '') or ''
+                    elif isinstance(j, dict):
+                        # OpenAI-compat fallback
+                        choices = j.get('choices') or []
+                        if choices and isinstance(choices[0], dict):
+                            delta = choices[0].get('delta') or {}
+                            chunk = delta.get('content', '') or ''
+                    if chunk:
+                        acc.append(chunk)
+                        if on_token:
+                            try:
+                                on_token(chunk)
+                            except Exception:
+                                pass
+                    if isinstance(j, dict) and j.get('done'):
+                        break
+                return ''.join(acc)
+            else:
+                r = self._request_with_retries('post', url, json=payload,
+                                                headers=headers, timeout=120)
+                if r is None:
+                    return ''
+                r.raise_for_status()
+                j = r.json()
+                if isinstance(j, dict):
+                    msg = j.get('message')
+                    if isinstance(msg, dict):
+                        return msg.get('content', '') or ''
+                    if 'response' in j:
+                        return j['response'] or ''
+                    choices = j.get('choices') or []
+                    if choices and isinstance(choices[0], dict):
+                        m = choices[0].get('message') or {}
+                        return m.get('content', '') or ''
+                return ''
+        except Exception as e:
+            logging.exception('chat_with_history failed')
+            print(f'\nError calling model: {e}')
+            return ''
+
+    def summarize_messages(self, messages: list) -> str:
+        """Produce a concise summary of a list of conversation messages.
+
+        Used by the Conversation auto-compactor. Falls back to a truncated
+        concatenation if the model is unreachable.
+        """
+        if not messages:
+            return ''
+        transcript_parts = []
+        for m in messages:
+            role = m.get('role', 'user')
+            content = (m.get('content') or '').strip()
+            if not content:
+                continue
+            transcript_parts.append(f"[{role}] {content}")
+        transcript = '\n'.join(transcript_parts)
+
+        prompt_messages = [
+            {'role': 'system', 'content': (
+                'You are a concise summarizer. Compress the given conversation '
+                'into a short structured summary (bullet points) preserving: '
+                '1) user goals & constraints, 2) key facts/decisions, '
+                '3) files/commands already run, 4) open questions. '
+                'Keep it under 200 words. No preamble.'
+            )},
+            {'role': 'user', 'content': f"Summarize this conversation:\n\n{transcript}"},
+        ]
+        try:
+            out = self.chat_with_history(prompt_messages, stream=False)
+            if out and out.strip():
+                return out.strip()
+        except Exception:
+            pass
+        # fallback: naive truncation
+        return transcript[:1500] + ('…' if len(transcript) > 1500 else '')
+
     # ── Agentic smart-instruction flow ──
 
     def handle_smart_instruction(self, instruction: str):
@@ -469,9 +583,9 @@ User question: {instruction}
                 if self._assess_risk([cmd]) > 30:
                     continue
                 try:
-                    shell_cmd = ['cmd', '/c', cmd] if self.detected_os == 'windows' else ['zsh', '-lc', cmd]
+                    from smart_terminal.platform_compat import user_shell_argv as _ush
                     res = subprocess.run(
-                        shell_cmd,
+                        _ush(cmd),
                         capture_output=True, text=True, timeout=15
                     )
                     output = (res.stdout + res.stderr).strip()
@@ -1525,10 +1639,9 @@ User question: {instruction}
 
             try:
                 # For interactive commands (sudo, password prompts), inherit the terminal so prompts work.
-                if self.detected_os == 'windows':
-                    res = subprocess.run(['cmd', '/c', c])
-                else:
-                    res = subprocess.run(['zsh', '-lc', c])
+                # Use the user's shell so PATH/aliases behave like an interactive session.
+                from smart_terminal.platform_compat import user_shell_argv as _ush
+                res = subprocess.run(_ush(c))
                 logging.info('Exit %s', res.returncode)
                 if hint:
                     print('[hint]', hint)

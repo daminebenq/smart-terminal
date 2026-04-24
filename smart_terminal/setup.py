@@ -77,32 +77,14 @@ def save_global_config(cfg: dict):
 
 def _lock_config():
     """Make the config file immutable (reject deletion/modification)."""
-    if not os.path.isfile(CONFIG_FILE):
-        return
-    try:
-        if platform.system() == 'Darwin':
-            subprocess.run(['chflags', 'uchg', CONFIG_FILE],
-                           capture_output=True, timeout=5)
-        elif platform.system() == 'Linux':
-            subprocess.run(['chattr', '+i', CONFIG_FILE],
-                           capture_output=True, timeout=5)
-    except Exception:
-        pass  # best-effort; works without lock on unsupported systems
+    from smart_terminal.platform_compat import lock_file
+    lock_file(CONFIG_FILE)
 
 
 def _unlock_config():
     """Remove immutable flag from config file so it can be written/deleted."""
-    if not os.path.isfile(CONFIG_FILE):
-        return
-    try:
-        if platform.system() == 'Darwin':
-            subprocess.run(['chflags', 'nouchg', CONFIG_FILE],
-                           capture_output=True, timeout=5)
-        elif platform.system() == 'Linux':
-            subprocess.run(['chattr', '-i', CONFIG_FILE],
-                           capture_output=True, timeout=5)
-    except Exception:
-        pass
+    from smart_terminal.platform_compat import unlock_file
+    unlock_file(CONFIG_FILE)
 
 
 def _prompt(message: str, default: str = '') -> str:
@@ -151,6 +133,13 @@ def run_setup():
     if not api_url:
         print('API URL is required.')
         api_url = _prompt('API URL', default_url)
+
+    # Normalize URL scheme (e.g. https:/host -> https://host)
+    if api_url and '://' not in api_url:
+        for scheme in ('https:/', 'http:/'):
+            if api_url.startswith(scheme):
+                api_url = scheme.rstrip('/') + '//' + api_url[len(scheme):]
+                break
 
     # 3. Model name
     model_hint = ''
