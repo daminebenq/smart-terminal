@@ -9,15 +9,27 @@ PYTHON     ?= python3
 VENV_PY    := $(VENV)/bin/python
 VENV_PIP   := $(VENV)/bin/pip
 
-.PHONY: install venv install-system test clean-cache run
+.PHONY: install venv install-system install-launcher test clean-cache run
 
 install: venv
 	$(VENV_PIP) install --upgrade pip
 	$(VENV_PIP) install -r requirements.txt
+	@$(MAKE) install-launcher
 	@echo ""
 	@echo "✓ Installed into $(VENV)"
-	@echo "  Activate with: source $(VENV)/bin/activate"
-	@echo "  Or run directly: $(VENV_PY) cli.py"
+	@echo "  Run from anywhere: smart-term"
+	@echo "  Or directly:        $(VENV_PY) cli.py"
+
+# Installs the 'smart-term' launcher (and st/term/do/web_* wrappers) onto PATH.
+# Tries /usr/local/bin (sudo if needed), falls back to ~/.local/bin.
+install-launcher:
+	@if [ -x install_smart_term.sh ]; then \
+		echo ""; \
+		echo "Installing 'smart-term' launcher onto PATH ..."; \
+		./install_smart_term.sh || echo "  (launcher install skipped — run ./install_smart_term.sh manually if needed)"; \
+	else \
+		echo "install_smart_term.sh not found or not executable; skipping launcher install"; \
+	fi
 
 venv:
 	@if [ ! -x "$(VENV_PY)" ]; then \
