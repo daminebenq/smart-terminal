@@ -53,7 +53,7 @@ C_BOLD  = '\033[1m'
 _SLASH_CMDS = [
     '/help', '/new', '/clear', '/compact', '/history', '/tokens',
     '/sessions', '/load', '/save', '/rename', '/delete', '/export',
-    '/model', '/system', '/reset', '/exec', '/exit', '/quit',
+    '/model', '/models', '/system', '/reset', '/exec', '/exit', '/quit',
     '/continue', '/memory', '/search', '/remember', '/pin', '/unpin',
     '/forget', '/forget-all',
 ]
@@ -87,6 +87,7 @@ AND persistent facts from prior sessions (long-term memory).
   /forget-all           Delete all unpinned memories
 
 {C_HDR}Model & prompt:{C_RESET}
+  /models               List all available models on the server
   /model <name>         Switch model (e.g. /model gemma4:31b-cloud)
   /system <text>        Replace the system prompt
   /reset                Reset system prompt to default
@@ -369,7 +370,28 @@ def _handle_slash(cmd: str, agent: TerminalAgent, conv: Conversation,
         except Exception as e:
             print(f"{C_WARN}Save failed: {e}{C_RESET}")
         return None
-
+    if head == '/models':
+        import requests as _req
+        url = f'{agent.api_base}/api/tags'
+        try:
+            r = _req.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            models = data.get('models') or []
+            if not models:
+                print(f'{C_DIM}No models returned from {url}{C_RESET}')
+                return None
+            print(f'{C_HDR}Available models at {agent.api_base}:{C_RESET}')
+            for m in models:
+                name = m.get('name', '?')
+                size = m.get('size', 0)
+                size_str = f'{size / 1e9:.1f} GB' if size else ''
+                active = f'  {C_OK}← current{C_RESET}' if name == agent.model else ''
+                print(f'  {C_DIM}•{C_RESET} {name:<40} {C_DIM}{size_str}{C_RESET}{active}')
+            print(f'\n  Use /model <name> to switch.')
+        except Exception as exc:
+            print(f'{C_WARN}Failed to fetch models: {exc}{C_RESET}')
+        return None
     if head == '/model':
         if not arg:
             print(f"Current model: {agent.model}")
