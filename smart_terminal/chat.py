@@ -2,12 +2,17 @@
 
 Features:
 - Persistent multi-turn conversation with the model
-- Streaming responses (tokens appear as generated)
-- Auto-compaction when context fills up
-- Slash commands: /new /clear /compact /history /save /load /sessions
-                  /model /system /tokens /exec /help /exit
-- Session persistence across restarts
-- Optional: extract & offer to run shell commands from responses
+- Streaming responses with a spinner while waiting for the first token
+- Auto-detect shell commands in responses → prompt [y]es / [n]o / [e]dit / [#]
+- Tab-completion for all slash commands (press Tab)
+- Bottom toolbar with live session / token-budget info
+- Alt+Enter / Ctrl+J to add a newline in the input (multiline paste works too)
+- Ctrl+L to clear the screen
+- Auto-compaction + long-term memorization when context fills up
+- Slash commands: /help /new /clear /compact /history /tokens /sessions
+                  /load /save /rename /delete /export /model /system /reset
+                  /exec /memory /search /remember /pin /unpin /forget /forget-all
+                  /continue /exit /quit
 """
 
 from __future__ import annotations
@@ -15,27 +20,43 @@ import os
 import re
 import sys
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.key_binding import KeyBindings
 
 from smart_terminal.platform_compat import user_shell_argv
 
 from smart_terminal.agent import TerminalAgent
 from smart_terminal.conversation import Conversation, SESSIONS_DIR
 
-# ANSI colors
-C_HDR = '\033[1;34m'
-C_OK = '\033[1;32m'
-C_WARN = '\033[1;33m'
-C_DIM = '\033[2m'
+# ── ANSI palette ──────────────────────────────────────────────────────────────
+C_HDR   = '\033[1;34m'   # bold blue
+C_OK    = '\033[1;32m'   # bold green
+C_WARN  = '\033[1;33m'   # bold yellow
+C_ERR   = '\033[1;31m'   # bold red
+C_DIM   = '\033[2m'      # dim
 C_RESET = '\033[0m'
-C_USER = '\033[1;36m'
-C_AI = '\033[1;35m'
+C_USER  = '\033[1;36m'   # bold cyan  (user prompt)
+C_AI    = '\033[1;35m'   # bold magenta (AI bullet)
+C_CODE  = '\033[0;32m'   # dark green (inline code)
+C_BOLD  = '\033[1m'
+
+# ── Slash-command list (drives Tab completion) ─────────────────────────────────
+_SLASH_CMDS = [
+    '/help', '/new', '/clear', '/compact', '/history', '/tokens',
+    '/sessions', '/load', '/save', '/rename', '/delete', '/export',
+    '/model', '/system', '/reset', '/exec', '/exit', '/quit',
+    '/continue', '/memory', '/search', '/remember', '/pin', '/unpin',
+    '/forget', '/forget-all',
+]
 
 HELP_TEXT = f"""{C_HDR}Smart Terminal — Chat Mode{C_RESET}
 Type naturally to chat. The assistant remembers the full conversation
@@ -75,9 +96,18 @@ AND persistent facts from prior sessions (long-term memory).
   /exit or /quit        Exit (auto-saves)
 
 {C_HDR}Keyboard:{C_RESET}
-  Ctrl-C               Cancel current input / exit if empty
-  Ctrl-D               Exit
-  ↑ / ↓                Browse input history
+  Tab                  Complete slash commands
+  Alt+Enter / Ctrl+J   Add a newline (multi-line input)
+  Ctrl+L               Clear screen
+  Ctrl+C               Cancel current input line
+  Ctrl+D               Exit
+  ↑ / ↓               Browse input history
+
+{C_HDR}After a response with shell commands:{C_RESET}
+  y / yes              Run all detected commands
+  n / no               Skip
+  e                    Edit each command before running
+  <number>             Run only that numbered command (e.g. 2)
 """
 
 
@@ -95,6 +125,92 @@ def _extract_shell_commands(text: str) -> list[str]:
                 continue
             cmds.append(line)
     return cmds
+
+
+class _Spinner:
+    """Animated spinner shown in stdout while waiting for the first streaming token."""
+
+    _CHARS = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+
+    def __init__(self, prefix: str = ''):
+        self._prefix = prefix
+        self._stop = threading.Event()
+        self._thr: Optional[threading.Thread] = None
+
+    def start(self):
+        self._stop.clear()
+        self._thr = threading.Thread(target=self._run, daemon=True)
+        self._thr.start()
+
+    def _run(self):
+        i = 0
+        while not self._stop.is_set():
+            ch = self._CHARS[i % len(self._CHARS)]
+            sys.stdout.write(f'\r{self._prefix}{C_AI}{ch}{C_RESET} {C_DIM}thinking…{C_RESET}')
+            sys.stdout.flush()
+            time.sleep(0.08)
+            i += 1
+
+    def stop(self):
+        """Stop the spinner and erase its line."""
+        self._stop.set()
+        if self._thr:
+            self._thr.join(timeout=0.5)
+        sys.stdout.write('\r\033[K')
+        sys.stdout.flush()
+
+
+def _offer_run_commands(cmds: list[str]) -> None:
+    """Show detected shell commands in a visual box and ask the user what to do."""
+    W = 58
+    fill = W - 15
+    print(f'\n{C_HDR}┌─ Commands found {"─" * fill}┐{C_RESET}')
+    for i, c in enumerate(cmds, 1):
+        disp = c if len(c) <= W - 8 else c[:W - 11] + '…'
+        pad = W - len(disp) - 6
+        print(f'{C_HDR}│{C_RESET}  {C_DIM}[{i}]{C_RESET} {disp}{" " * max(0, pad)}{C_HDR}│{C_RESET}')
+    print(f'{C_HDR}└{"─" * (W + 1)}┘{C_RESET}')
+    print(f'  {C_DIM}[y] run all  [n] skip  [e] edit  [#] single  → {C_RESET}', end='', flush=True)
+
+    try:
+        ans = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if not ans or ans in ('n', 'no'):
+        return
+
+    if ans in ('y', 'yes'):
+        to_run = list(cmds)
+    elif ans.isdigit():
+        idx = int(ans) - 1
+        if 0 <= idx < len(cmds):
+            to_run = [cmds[idx]]
+        else:
+            print(f'{C_WARN}  Index out of range.{C_RESET}')
+            return
+    elif ans == 'e':
+        to_run = []
+        for c in cmds:
+            try:
+                edited = input(f'  {C_DIM}Edit →{C_RESET} {c}\n        ').strip()
+                to_run.append(edited if edited else c)
+            except (EOFError, KeyboardInterrupt):
+                break
+    else:
+        return
+
+    print()
+    for c in to_run:
+        print(f'  {C_DIM}$ {c}{C_RESET}')
+        try:
+            result = subprocess.run(user_shell_argv(c), check=False)
+            if result.returncode != 0:
+                print(f'  {C_WARN}↳ exit {result.returncode}{C_RESET}')
+        except Exception as exc:
+            print(f'  {C_WARN}↳ error: {exc}{C_RESET}')
+    print()
 
 
 def _print_status(conv: Conversation, model: str):
@@ -284,22 +400,7 @@ def _handle_slash(cmd: str, agent: TerminalAgent, conv: Conversation,
         if not cmds:
             print(f"{C_DIM}No shell commands found in last response.{C_RESET}")
             return None
-        print(f"{C_HDR}Proposed commands:{C_RESET}")
-        for i, c in enumerate(cmds, 1):
-            print(f"  [{i}] {c}")
-        try:
-            ans = input(f"Run these commands? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = ''
-        if ans != 'y':
-            print(f"{C_DIM}Aborted.{C_RESET}")
-            return None
-        for c in cmds:
-            print(f"{C_DIM}$ {c}{C_RESET}")
-            try:
-                subprocess.run(user_shell_argv(c), check=False)
-            except Exception as e:
-                print(f"{C_WARN}Error running command: {e}{C_RESET}")
+        _offer_run_commands(cmds)
         return None
 
     # ── Session management (new) ──
@@ -480,8 +581,8 @@ def run_chat(agent: TerminalAgent, conv: Optional[Conversation] = None,
     """Run the continuous chat REPL.
 
     Args:
-        agent: configured TerminalAgent
-        conv: existing conversation to use (else new one created)
+        agent:  configured TerminalAgent
+        conv:   existing Conversation to use (else new one created)
         resume: if True and conv is None, resume latest session
     """
     if conv is None:
@@ -498,32 +599,72 @@ def run_chat(agent: TerminalAgent, conv: Optional[Conversation] = None,
     if ctx_env and ctx_env.isdigit():
         conv.max_context_tokens = int(ctx_env)
 
-    # Print header
+    # ── Header ────────────────────────────────────────────────────────────────
+    model_short = agent.model.split(':')[0]
     print(f"""
 {C_HDR}╔══════════════════════════════════════════╗
 ║     Smart Terminal — Chat Mode           ║
 ╚══════════════════════════════════════════╝{C_RESET}
-{C_DIM}Model: {agent.model} · Session: {conv.session_id}
-Type /help for commands, /exit to quit.{C_RESET}
+{C_DIM}Model  : {agent.model}
+Session: {conv.session_id}
+Tip    : Tab completes /commands · Alt+Enter for newline · Ctrl+L clears screen{C_RESET}
 """)
 
+    # ── Prompt-toolkit setup ──────────────────────────────────────────────────
     history_file = os.path.join(os.path.expanduser('~'), '.smart_terminal_chat_history')
-    session = PromptSession(history=FileHistory(history_file))
+
+    kb = KeyBindings()
+
+    @kb.add('c-l')
+    def _clear_screen(event):
+        """Ctrl+L — clear the terminal."""
+        event.app.renderer.clear()
+
+    @kb.add('escape', 'enter')
+    @kb.add('c-j')
+    def _newline(event):
+        """Alt+Enter / Ctrl+J — insert a literal newline into the input buffer."""
+        event.current_buffer.insert_text('\n')
+
+    completer = WordCompleter(
+        _SLASH_CMDS,
+        pattern=re.compile(r'(/\w*)'),
+        sentence=True,
+    )
+
+    # Bottom toolbar — closure captures `conv` by reference so it updates when
+    # the session is switched inside the while-loop.
+    def _toolbar():
+        tokens = conv.estimate_total_tokens()
+        pct = int(100 * tokens / conv.max_context_tokens) if conv.max_context_tokens else 0
+        bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
+        color = 'ansigreen' if pct < 60 else ('ansiyellow' if pct < 85 else 'ansired')
+        sid = conv.session_id[:24]
+        return HTML(
+            f'<b><style fg="ansiblue">{sid}</style></b>  '
+            f'<style fg="{color}">{bar} {pct}%</style>  '
+            f'<style fg="ansigray">· {model_short}  · /help</style>'
+        )
+
+    pt_session = PromptSession(
+        history=FileHistory(history_file),
+        completer=completer,
+        complete_while_typing=False,   # Tab-only, no distracting pop-up while typing
+        key_bindings=kb,
+        bottom_toolbar=_toolbar,
+        wrap_lines=True,
+    )
 
     last_response: list[str] = ['']
 
     while True:
-        # prompt
+        # ── Prompt ───────────────────────────────────────────────────────────
         try:
             with patch_stdout():
-                user_input = session.prompt(ANSI(f"\n{C_USER}❯{C_RESET} "))
+                user_input = pt_session.prompt(ANSI(f'\n{C_USER}❯{C_RESET} '))
         except KeyboardInterrupt:
-            print(f"\n{C_DIM}(Ctrl-C again or /exit to quit){C_RESET}")
-            try:
-                with patch_stdout():
-                    user_input = session.prompt(ANSI(f"{C_USER}❯{C_RESET} "))
-            except (KeyboardInterrupt, EOFError):
-                break
+            print(f"\n{C_DIM}(Ctrl-C to cancel · /exit to quit){C_RESET}")
+            continue
         except EOFError:
             break
 
@@ -533,7 +674,7 @@ Type /help for commands, /exit to quit.{C_RESET}
         if not user_input:
             continue
 
-        # slash commands
+        # ── Slash commands ────────────────────────────────────────────────────
         if user_input.startswith('/'):
             try:
                 maybe_new = _handle_slash(user_input, agent, conv, last_response)
@@ -543,47 +684,73 @@ Type /help for commands, /exit to quit.{C_RESET}
                 return 0
             continue
 
-        # Auto-compact before sending if needed
+        # ── Pre-send auto-compact ─────────────────────────────────────────────
         _auto_compact_if_needed(agent, conv)
 
-        # Add user message
+        # ── Stream response ───────────────────────────────────────────────────
         conv.add_user(user_input)
 
-        # Stream assistant response
-        print(f"\n{C_AI}●{C_RESET} ", end='', flush=True)
+        print()  # blank line before response
+
+        spinner = _Spinner(prefix='  ')
+        spinner.start()
+
         accumulated: list[str] = []
+        first_token = False
+        full = ''
 
         def on_token(tok: str):
+            nonlocal first_token
+            if not first_token:
+                spinner.stop()
+                sys.stdout.write(f'{C_AI}●{C_RESET} ')
+                sys.stdout.flush()
+                first_token = True
             sys.stdout.write(tok)
             sys.stdout.flush()
             accumulated.append(tok)
 
         try:
             full = agent.chat_with_history(
-                conv.to_api_messages(), stream=True, on_token=on_token
+                conv.to_api_messages(), stream=True, on_token=on_token,
             )
         except KeyboardInterrupt:
-            print(f"\n{C_WARN}(interrupted){C_RESET}")
-            # keep partial
             full = ''.join(accumulated)
+            print(f"\n{C_WARN}(interrupted){C_RESET}")
+        except Exception as exc:
+            full = ''.join(accumulated)
+            print(f"\n{C_WARN}Model error: {exc}{C_RESET}")
+        finally:
+            spinner.stop()
+            if not first_token:
+                # Spinner ended without any tokens (error / empty) — print bullet anyway
+                sys.stdout.write(f'{C_AI}●{C_RESET} ')
+                sys.stdout.flush()
 
-        print()  # newline after streamed response
+        print()  # newline after streamed content
+        print(f"{C_DIM}{'─' * 58}{C_RESET}")  # visual separator between turns
 
         response_text = full or ''.join(accumulated)
+
         if response_text.strip():
             conv.add_assistant(response_text)
             last_response[0] = response_text
-            # autosave after each turn (best-effort)
             try:
                 conv.save()
             except Exception:
                 pass
+
+            # ── Auto-offer shell commands found in the response ───────────
+            cmds = _extract_shell_commands(response_text)
+            if cmds:
+                _offer_run_commands(cmds)
         else:
             print(f"{C_WARN}(empty response — model may be unreachable){C_RESET}")
-            # remove the user message we added so history isn't left dangling
+            # Remove the dangling user message so history stays consistent
             if conv.messages and conv.messages[-1].get('role') == 'user':
                 conv.messages.pop()
 
+    # ── Graceful exit ─────────────────────────────────────────────────────────
     try:
         conv.save()
     except Exception:
