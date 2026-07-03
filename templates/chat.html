@@ -1,0 +1,674 @@
+{% extends "base.html" %}
+
+{% block title %}{{ session_id }} - Smart Terminal{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5><i class="fas fa-comment"></i> {{ session_id }}</h5>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="exportChat()" title="Export Chat">
+                        <i class="fas fa-download"></i>
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="scrollToTop()" title="Scroll to Top">
+                        <i class="fas fa-arrow-up"></i>
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="scrollToBottom()" title="Scroll to Bottom">
+                        <i class="fas fa-arrow-down"></i>
+                    </button>
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-primary btn-sm" title="Dashboard">
+                        <i class="fas fa-list"></i> Dashboard
+                    </a>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="messagesContainer" class="messages-container mb-3">
+                    <div id="loadingMessages" class="text-center text-muted">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        Loading conversation...
+                    </div>
+                    <div id="messagesList" style="display: none;">
+                        <!-- Messages will be loaded here -->
+                    </div>
+                    <!-- Background tasks container -->
+                    <div id="tasksContainer" style="display: none;">
+                        <!-- Active background tasks -->
+                    </div>
+                </div>
+
+                <div id="inputArea" class="input-area" style="display: none;">
+                    <div class="mb-2">
+                        <small class="text-muted">
+                            <i class="fas fa-terminal"></i> 
+                            <span id="commandStatus">Ready for commands</span>
+                        </small>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <textarea id="messageInput" class="form-control" rows="3" 
+                            placeholder="Type your message or command here... Supports Markdown & shell commands" 
+                            onkeypress="handleKeyPress(event)"
+                            onkeydown="handleKeyDown(event)"></textarea>
+                        <div class="d-flex flex-column">
+                            <button id="sendButton" class="btn btn-primary mb-2" onclick="sendMessage()" title="Send (Ctrl+Enter)">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="clearInput()" title="Clear">
+                                <i class="fas fa-times"></i>
+                            </button>
+                            <button class="btn btn-outline-info btn-sm mt-2" onclick="insertCommandTemplate()" title="Insert Command">
+                                <i class="fas fa-terminal"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center mt-2">
+                        <div>
+                            <small class="text-muted me-3">
+                                <i class="fas fa-info-circle"></i> Press Ctrl+Enter to send
+                            </small>
+                            <button class="btn btn-link btn-sm p-0 text-muted" onclick="toggleHelp()" title="Formatting Help">
+                                <i class="fas fa-question-circle"></i> Formatting
+                            </button>
+                        </div>
+                        <small id="tokenCount" class="text-muted">
+                            <i class="fas fa-microchip"></i> <span id="tokenCountValue"></span> tokens
+                        </small>
+                    </div>
+                </div>
+
+                <!-- Formatting Help (hidden by default) -->
+                <div id="formattingHelp" class="alert alert-info alert-sm" style="display: none;">
+                    <h6><i class="fas fa-info-circle"></i> Formatting & Commands</h6>
+                    <ul class="mb-0 small">
+                        <li><strong>Code blocks:</strong> Use <code>```bash</code> for shell commands (auto-executable)</li>
+                        <li><strong>Inline code:</strong> Use <code>`code`</code> for inline formatting</li>
+                        <li><strong>Markdown:</strong> Supports *italic*, **bold**, # headers, - lists</li>
+                        <li><strong>Background tasks:</strong> Use <code>```bash --bg</code> to run async</li>
+                        <li><strong>Copy code:</strong> Click the copy button on any code block</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+
+<script>
+let currentSessionId = '{{ session_id }}';
+let backgroundTasks = new Map();
+let taskIdCounter = 0;
+
+// Initialize Marked with syntax highlighting
+marked.setOptions({
+    breaks: true,
+    gfm: true,
+    highlight: function(code, lang) {
+        if (Prism.languages[lang]) {
+            return Prism.highlight(code, Prism.languages[lang], lang);
+        }
+        return code;
+    }
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadMessages();
+    // Initialize auto-resize
+    const textarea = document.getElementById('messageInput');
+    textarea.addEventListener('input', autoResizeTextarea);
+});
+
+function loadMessages() {
+    fetch(`/api/sessions/${currentSessionId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+            
+            displayMessages(data);
+            document.getElementById('inputArea').style.display = 'block';
+            
+            // Update token count
+            if (data.token_count) {
+                document.getElementById('tokenCountValue').textContent = data.token_count;
+            }
+        })
+        .catch(error => {
+            showError('Failed to load messages: ' + error.message);
+        });
+}
+
+function displayMessages(data) {
+    const container = document.getElementById('messagesList');
+    const loading = document.getElementById('loadingMessages');
+    
+    loading.style.display = 'none';
+    container.style.display = 'block';
+    container.innerHTML = '';
+    
+    // Display system prompt
+    if (data.system_prompt) {
+        const systemMsg = createMessageElement('system', data.system_prompt, '');
+        container.appendChild(systemMsg);
+    }
+    
+    // Display compacted summary
+    if (data.compacted_summary) {
+        const summaryMsg = createMessageElement('summary', data.compacted_summary, '');
+        container.appendChild(summaryMsg);
+    }
+    
+    // Display messages
+    data.messages.forEach(msg => {
+        const msgElement = createMessageElement(
+            msg.role, 
+            msg.content, 
+            msg.timestamp_formatted
+        );
+        container.appendChild(msgElement);
+    });
+    
+    // Highlight code blocks
+    Prism.highlightAll();
+    
+    // Scroll to bottom
+    scrollToBottom();
+}
+
+function createMessageElement(role, content, timestamp) {
+    const div = document.createElement('div');
+    div.className = `message message-${role} mb-3`;
+    
+    let icon = '';
+    let colorClass = '';
+    let roleText = '';
+    
+    switch (role) {
+        case 'user':
+            icon = 'fa-user';
+            colorClass = 'user-message';
+            roleText = 'You';
+            break;
+        case 'assistant':
+            icon = 'fa-robot';
+            colorClass = 'assistant-message';
+            roleText = 'Assistant';
+            break;
+        case 'system':
+            icon = 'fa-cog';
+            colorClass = 'system-message';
+            roleText = 'System';
+            break;
+        case 'summary':
+            icon = 'fa-compress';
+            colorClass = 'summary-message';
+            roleText = 'Summary';
+            break;
+        case 'task':
+            icon = 'fa-cogs';
+            colorClass = 'task-message';
+            roleText = 'Background Task';
+            break;
+        default:
+            icon = 'fa-circle';
+            colorClass = 'message-default';
+            roleText = role;
+    }
+    
+    // Enhanced content formatting
+    let formattedContent = enhancedMarkdownFormat(content);
+    
+    div.innerHTML = `
+        <div class="message-header d-flex justify-content-between align-items-center mb-2">
+            <span class="text-muted">
+                <i class="fas ${icon}"></i> ${roleText}
+            </span>
+            ${timestamp ? `<small class="text-muted">${timestamp}</small>` : ''}
+        </div>
+        <div class="message-content ${colorClass}">
+            ${formattedContent}
+        </div>
+    `;
+    
+    return div;
+}
+
+function enhancedMarkdownFormat(content) {
+    // Process code blocks with execution options
+    content = content.replace(/```(bash|sh|shell)(?:\s*--bg)?\n([\s\S]*?)```/g, function(match, lang, code) {
+        const isBackground = match.includes('--bg');
+        const taskId = isBackground ? `task-${++taskIdCounter}` : '';
+        
+        return `
+            <div class="code-block-container position-relative mb-3">
+                <div class="code-block-header d-flex justify-content-between align-items-center px-3 py-2 border-bottom">
+                    <small class="text-muted">
+                        <i class="fas fa-terminal"></i> ${lang.toUpperCase()}
+                        ${isBackground ? '<span class="badge bg-warning ms-2">BACKGROUND</span>' : ''}
+                    </small>
+                    <div class="btn-group btn-group-sm">
+                        ${isBackground ? `
+                            <button class="btn btn-outline-success btn-sm" onclick="executeBackgroundTask('${taskId}', '${encodeURIComponent(code.trim())}')" title="Run in Background">
+                                <i class="fas fa-play"></i>
+                            </button>
+                        ` : `
+                            <button class="btn btn-outline-primary btn-sm" onclick="executeCommand('${encodeURIComponent(code.trim())}')" title="Execute">
+                                <i class="fas fa-play"></i>
+                            </button>
+                        `}
+                        <button class="btn btn-outline-secondary btn-sm" onclick="copyToClipboard(\`${code.trim()}\`)" title="Copy">
+                            <i class="fas fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+                <pre class="bash-code-block code-with-actions mb-0"><code class="language-bash">${escapeHtml(code.trim())}</code></pre>
+                ${isBackground ? `<div id="${taskId}-output" class="task-output p-2 border-top" style="display: none;"></div>` : ''}
+            </div>
+        `;
+    });
+    
+    // Regular markdown for non-code content
+    try {
+        const markdownContent = marked.parse(content);
+        return markdownContent;
+    } catch (e) {
+        // Fallback to basic formatting
+        return content
+            .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+            .replace(/\n/g, '<br>');
+    }
+}
+
+function executeCommand(encodedCommand) {
+    const command = decodeURIComponent(encodedCommand);
+    updateCommandStatus('Executing command...');
+    
+    fetch('/api/execute', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ command: command, background: false })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            updateCommandStatus(`Error: ${data.error}`);
+            smartTerminal.showToast(`Command failed: ${data.error}`, 'error');
+        } else {
+            updateCommandStatus('Command completed');
+            const resultMsg = createMessageElement('assistant', `\`\`\`\n${data.output}\n\`\`\``, new Date().toLocaleString());
+            document.getElementById('messagesList').appendChild(resultMsg);
+            scrollToBottom();
+        }
+    })
+    .catch(error => {
+        updateCommandStatus(`Error: ${error.message}`);
+        smartTerminal.showToast(`Execution error: ${error.message}`, 'error');
+    });
+}
+
+function executeBackgroundTask(taskId, encodedCommand) {
+    const command = decodeURIComponent(encodedCommand);
+    updateCommandStatus('Starting background task...');
+    
+    const task = {
+        id: taskId,
+        command: command,
+        status: 'running',
+        startTime: Date.now()
+    };
+    
+    backgroundTasks.set(taskId, task);
+    updateTasksContainer();
+    
+    fetch('/api/execute', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ command: command, background: true, task_id: taskId })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            backgroundTasks.delete(taskId);
+            updateTasksContainer();
+            smartTerminal.showToast(`Background task failed: ${data.error}`, 'error');
+        } else {
+            // Task started successfully
+            smartTerminal.showToast('Background task started', 'success');
+            // Poll for task completion
+            pollTaskCompletion(taskId);
+        }
+    })
+    .catch(error => {
+        backgroundTasks.delete(taskId);
+        updateTasksContainer();
+        smartTerminal.showToast(`Failed to start task: ${error.message}`, 'error');
+    });
+}
+
+function pollTaskCompletion(taskId) {
+    const interval = setInterval(() => {
+        fetch(`/api/task/${taskId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (!backgroundTasks.has(taskId)) {
+                    clearInterval(interval);
+                    return;
+                }
+                
+                const task = backgroundTasks.get(taskId);
+                task.status = data.status;
+                task.output = data.output;
+                
+                updateTasksContainer();
+                
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(interval);
+                    // Auto-remove successful tasks after 30 seconds, error tasks after 5 minutes
+                    const timeout = data.status === 'completed' ? 30000 : 300000;
+                    setTimeout(() => {
+                        backgroundTasks.delete(taskId);
+                        updateTasksContainer();
+                    }, timeout);
+                }
+            })
+            .catch(error => {
+                clearInterval(interval);
+                backgroundTasks.delete(taskId);
+                updateTasksContainer();
+            });
+    }, 2000);
+}
+
+function updateTasksContainer() {
+    const container = document.getElementById('tasksContainer');
+    
+    if (backgroundTasks.size === 0) {
+        container.style.display = 'none';
+        return;
+    }
+    
+    container.style.display = 'block';
+    container.innerHTML = `
+        <div class="alert alert-info mb-2">
+            <h6 class="mb-2"><i class="fas fa-cogs"></i> Background Tasks</h6>
+            ${Array.from(backgroundTasks.values()).map(task => `
+                <div class="d-flex justify-content-between align-items-center mb-2 task-item" id="task-${task.id}">
+                    <div>
+                        <code class="small">${escapeHtml(task.command.substring(0, 50))}${task.command.length > 50 ? '...' : ''}</code>
+                        <span class="badge bg-${task.status === 'running' ? 'primary' : task.status === 'completed' ? 'success' : 'danger'} ms-2">
+                            ${task.status}
+                        </span>
+                    </div>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="showTaskOutput('${task.id}')" title="Show/Hide Output">
+                        <i class="fas fa-eye"></i>
+                    </button>
+                </div>
+                <div id="${task.id}-output" class="task-output p-2 bg-dark text-light rounded mb-2" style="display: none; font-family: monospace; font-size: 0.85em; max-height: 200px; overflow-y: auto;">
+                    ${task.output ? escapeHtml(task.output) : '<em class="text-muted">No output yet...</em>'}
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+function showTaskOutput(taskId) {
+    const output = document.getElementById(`${taskId}-output`);
+    if (output) {
+        output.style.display = output.style.display === 'none' ? 'block' : 'none';
+    }
+}
+
+function updateCommandStatus(status) {
+    document.getElementById('commandStatus').textContent = status;
+}
+
+function sendMessage() {
+    const input = document.getElementById('messageInput');
+    const message = input.value.trim();
+    
+    if (!message) return;
+    
+    // Add user message to UI immediately
+    const userMsg = createMessageElement('user', message, new Date().toLocaleString());
+    document.getElementById('messagesList').appendChild(userMsg);
+    
+    // Clear input and auto-resize
+    input.value = '';
+    if (typeof smartTerminal !== 'undefined' && smartTerminal.autoResizeTextarea) {
+        smartTerminal.autoResizeTextarea(input);
+    } else {
+        autoResizeTextarea({ target: input });
+    }
+    
+    // Show streaming typing indicator
+    const typingMsg = createStreamingIndicator();
+    document.getElementById('messagesList').appendChild(typingMsg);
+    
+    // Scroll to bottom
+    scrollToBottom();
+    
+    updateCommandStatus('Processing message...');
+    
+    // Send message
+    fetch(`/api/chat/${currentSessionId}/message`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message: message })
+    })
+    .then(response => response.json())
+    .then(data => {
+        // Remove typing message
+        typingMsg.remove();
+        
+        if (data.error) {
+            const errorMsg = createMessageElement('assistant', `Error: ${data.error}`, data.timestamp || new Date().toLocaleString());
+            document.getElementById('messagesList').appendChild(errorMsg);
+        } else {
+            const assistantMsg = createMessageElement('assistant', data.response, data.timestamp || new Date().toLocaleString());
+            document.getElementById('messagesList').appendChild(assistantMsg);
+        }
+        
+        updateCommandStatus('Ready for commands');
+        scrollToBottom();
+        updateTokenCount();
+        
+        // Re-highlight code blocks
+        setTimeout(() => {
+            if (typeof Prism !== 'undefined') {
+                Prism.highlightAll();
+            }
+        }, 100);
+    })
+    .catch(error => {
+        typingMsg.remove();
+        const errorMsg = createMessageElement('assistant', `Error: ${error.message}`, new Date().toLocaleString());
+        document.getElementById('messagesList').appendChild(errorMsg);
+        updateCommandStatus('Error occurred');
+        scrollToBottom();
+    });
+}
+
+function createStreamingIndicator() {
+    const div = document.createElement('div');
+    div.className = 'message message-assistant mb-3';
+    div.innerHTML = `
+        <div class="message-header d-flex justify-content-between align-items-center mb-1">
+            <span class="text-muted">
+                <i class="fas fa-robot"></i> Assistant
+            </span>
+        </div>
+        <div class="message-content assistant-message typing-indicator">
+            <div class="d-flex align-items-center">
+                <span class="me-2">Thinking</span>
+                <div class="typing-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+            </div>
+        </div>
+    `;
+    return div;
+}
+
+function updateTokenCount() {
+    const messages = document.getElementById('messagesList').querySelectorAll('.message');
+    let totalTokens = 0;
+    
+    messages.forEach(msg => {
+        const content = msg.querySelector('.message-content');
+        if (content) {
+            // Rough token estimation (4 chars per token on average)
+            totalTokens += Math.ceil(content.textContent.length / 4);
+        }
+    });
+    
+    document.getElementById('tokenCountValue').textContent = totalTokens.toLocaleString();
+}
+
+function handleKeyPress(event) {
+    if (event.key === 'Enter' && event.ctrlKey) {
+        event.preventDefault();
+        sendMessage();
+    }
+}
+
+function handleKeyDown(event) {
+    // Ctrl+/ to insert command template
+    if (event.ctrlKey && event.key === '/') {
+        event.preventDefault();
+        insertCommandTemplate();
+    }
+}
+
+function clearInput() {
+    const input = document.getElementById('messageInput');
+    input.value = '';
+    input.focus();
+    if (typeof smartTerminal !== 'undefined' && smartTerminal.autoResizeTextarea) {
+        smartTerminal.autoResizeTextarea(input);
+    } else {
+        autoResizeTextarea({ target: input });
+    }
+}
+
+function insertCommandTemplate() {
+    const input = document.getElementById('messageInput');
+    const template = "```bash\n# Enter your command here\nls -la\n```";
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    
+    input.value = input.value.substring(0, start) + template + input.value.substring(end);
+    input.selectionStart = input.selectionEnd = start + template.length - 5; // Position cursor inside code block
+    input.focus();
+    if (typeof smartTerminal !== 'undefined' && smartTerminal.autoResizeTextarea) {
+        smartTerminal.autoResizeTextarea(input);
+    } else {
+        autoResizeTextarea({ target: input });
+    }
+}
+
+function toggleHelp() {
+    const help = document.getElementById('formattingHelp');
+    help.style.display = help.style.display === 'none' ? 'block' : 'none';
+}
+
+function exportChat() {
+    fetch(`/api/sessions/${currentSessionId}/export`)
+        .then(response => response.text())
+        .then(markdown => {
+            const blob = new Blob([markdown], { type: 'text/markdown' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${currentSessionId}.md`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            }, 100);
+        })
+        .catch(error => {
+            if (typeof smartTerminal !== 'undefined' && smartTerminal.showToast) {
+                smartTerminal.showToast('Failed to export chat: ' + error.message, 'error');
+            } else {
+                alert('Failed to export chat: ' + error.message);
+            }
+        });
+}
+
+function scrollToTop() {
+    document.getElementById('messagesContainer').scrollTop = 0;
+}
+
+function scrollToBottom() {
+    const container = document.getElementById('messagesContainer');
+    container.scrollTop = container.scrollHeight;
+}
+
+function showError(message) {
+    const container = document.getElementById('messagesList');
+    container.innerHTML = `
+        <div class="alert alert-danger" role="alert">
+            <i class="fas fa-exclamation-triangle"></i> ${message}
+        </div>
+    `;
+    document.getElementById('loadingMessages').style.display = 'none';
+    document.getElementById('inputArea').style.display = 'block';
+    container.style.display = 'block';
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function autoResizeTextarea(event) {
+    const textarea = event.target || event;
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+}
+
+// Auto-focus message input
+document.addEventListener('DOMContentLoaded', function() {
+    const messageInput = document.getElementById('messageInput');
+    messageInput.focus();
+    
+    // Auto-paste support for terminal commands
+    messageInput.addEventListener('paste', function(e) {
+        const clipboardData = e.clipboardData || window.clipboardData;
+        const pastedText = clipboardData.getData('text');
+        
+        // If pasted text looks like a command, wrap it in code block
+        if (pastedText.trim().match(/^\w+\s+/)) {
+            e.preventDefault();
+            const wrapped = `\`\`\`bash\n${pastedText}\`\`\``;
+            const start = messageInput.selectionStart;
+            const end = messageInput.selectionEnd;
+            
+            messageInput.value = messageInput.value.substring(0, start) + wrapped + messageInput.value.substring(end);
+            messageInput.selectionStart = messageInput.selectionEnd = start + wrapped.length;
+            autoResizeTextarea({ target: messageInput });
+        }
+    });
+});
+</script>
+{% endblock %}

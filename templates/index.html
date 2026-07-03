@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+
+{% block title %}Smart Terminal - Dashboard{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="fas fa-comments"></i> Conversation Dashboard</h1>
+            <div class="d-flex gap-2">
+                <input type="text" class="form-control" id="searchInput" placeholder="Search conversations..." style="width: 300px;">
+                <button class="btn btn-outline-secondary" onclick="searchSessions()">
+                    <i class="fas fa-search"></i>
+                </button>
+                <button class="btn btn-outline-info" onclick="clearSearch()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        </div>
+
+        <div id="loadingSpinner" class="text-center my-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-2">Loading conversations...</p>
+        </div>
+
+        <div id="sessionsContainer" class="row" style="display: none;">
+            <!-- Sessions will be loaded here -->
+        </div>
+
+        <div id="emptyState" class="text-center my-5" style="display: none;">
+            <i class="fas fa-comments fa-4x text-muted mb-3"></i>
+            <h3>No conversations found</h3>
+            <p class="text-muted">Start a new conversation or check your search terms.</p>
+            <button class="btn btn-primary" onclick="createNewSession()">
+                <i class="fas fa-plus"></i> Start New Conversation
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Session Template (hidden) -->
+<template id="sessionTemplate">
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0(session-title)">Session Title</h6>
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                        <i class="fas fa-ellipsis-v"></i>
+                    </button>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item" href="#" onclick="openChat('$(session-id)')">
+                            <i class="fas fa-comment"></i> Open Chat
+                        </a></li>
+                        <li><a class="dropdown-item" href="#" onclick="exportSession('$(session-id)')">
+                            <i class="fas fa-download"></i> Export
+                        </a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="#" onclick="renameSession('$(session-id)')">
+                            <i class="fas fa-edit"></i> Rename
+                        </a></li>
+                        <li><a class="dropdown-item text-danger" href="#" onclick="deleteSession('$(session-id)')">
+                            <i class="fas fa-trash"></i> Delete
+                        </a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="card-body">
+                <p class="card-text text-muted small">
+                    <i class="fas fa-clock"></i> Updated: <span class="session-updated-at"></span>
+                </p>
+                <p class="card-text session-preview"></p>
+                <div class="d-flex justify-content-between align-items-center">
+                    <small class="text-muted">
+                        <i class="fas fa-message"></i> <span class="session-msg-count"></span> messages
+                    </small>
+                    <small class="text-muted">
+                        <i class="fas fa-microchip"></i> <span class="session-token-count"></span> tokens
+                    </small>
+                </div>
+            </div>
+            <div class="card-footer">
+                <a href="/chat/$(session-id)" class="btn btn-primary btn-sm">
+                    <i class="fas fa-comment"></i> Open
+                </a>
+                <button class="btn btn-outline-secondary btn-sm ms-2" onclick="exportSession('$(session-id)')">
+                    <i class="fas fa-download"></i> Export
+                </button>
+            </div>
+        </div>
+    </div>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentSessionId = '';
+let isSearchMode = false;
+
+// Load sessions on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadSessions();
+});
+
+function loadSessions() {
+    showLoading();
+    const url = isSearchMode ? `/api/sessions/search?q=${encodeURIComponent(document.getElementById('searchInput').value)}` : '/api/sessions';
+    
+    fetch(url)
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+            
+            hideLoading();
+            displaySessions(data.sessions);
+        })
+        .catch(error => {
+            showError('Failed to load sessions: ' + error.message);
+        });
+}
+
+function displaySessions(sessions) {
+    const container = document.getElementById('sessionsContainer');
+    const emptyState = document.getElementById('emptyState');
+    
+    container.innerHTML = '';
+    
+    if (sessions.length === 0) {
+        container.style.display = 'none';
+        emptyState.style.display = 'block';
+        return;
+    }
+    
+    container.style.display = 'flex';
+    emptyState.style.display = 'none';
+    
+    const template = document.getElementById('sessionTemplate');
+    
+    sessions.forEach(session => {
+        const clone = document.importNode(template.content, true);
+        
+        // Replace placeholders in the template
+        const html = new DOMParser().parseFromString(
+            clone.querySelector('.card').outerHTML
+                .replace(/\$\(session-id\)/g, session.session_id),
+            'text/html'
+        );
+        
+        const card = html.querySelector('.card');
+        
+// Set session data
+        const titleElement = card.querySelector('.session-title');
+        if (titleElement) titleElement.textContent = session.session_id;
+        
+        const updatedAtElement = card.querySelector('.session-updated-at');
+        if (updatedAtElement) updatedAtElement.textContent = session.updated_at_formatted;
+        
+        const previewElement = card.querySelector('.session-preview');
+        if (previewElement) previewElement.textContent = session.preview;
+        
+        const msgCountElement = card.querySelector('.session-msg-count');
+        if (msgCountElement) msgCountElement.textContent = session.msg_count || 0;
+        
+        const tokenCountElement = card.querySelector('.session-token-count');
+        if (tokenCountElement) tokenCountElement.textContent = session.token_count || 0;
+        
+// Set href attributes
+        const chatLink = card.querySelector('a[href*="chat"]');
+        if (chatLink) {
+            chatLink.setAttribute('href', `/chat/${session.session_id}`);
+        }
+        
+        container.appendChild(card);
+    });
+}
+
+function showLoading() {
+    document.getElementById('loadingSpinner').style.display = 'block';
+    document.getElementById('sessionsContainer').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+}
+
+function hideLoading() {
+    document.getElementById('loadingSpinner').style.display = 'none';
+}
+
+function showError(message) {
+    hideLoading();
+    const container = document.getElementById('sessionsContainer');
+    container.innerHTML = `
+        <div class="col-12">
+            <div class="alert alert-danger" role="alert">
+                <i class="fas fa-exclamation-triangle"></i> ${message}
+            </div>
+        </div>
+    `;
+}
+
+function searchSessions() {
+    const query = document.getElementById('searchInput').value.trim();
+    if (query) {
+        isSearchMode = true;
+        loadSessions();
+    }
+}
+
+function clearSearch() {
+    document.getElementById('searchInput').value = '';
+    isSearchMode = false;
+    loadSessions();
+}
+
+// Handle Enter key in search
+document.getElementById('searchInput').addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') {
+        searchSessions();
+    }
+});
+
+function openChat(sessionId) {
+    window.location.href = `/chat/${sessionId}`;
+}
+
+function exportSession(sessionId) {
+    window.open(`/api/sessions/${sessionId}/export`, '_blank');
+}
+
+function renameSession(sessionId) {
+    currentSessionId = sessionId;
+    const modal = new bootstrap.Modal(document.getElementById('renameSessionModal'));
+    document.getElementById('newSessionName').value = sessionId;
+    modal.show();
+}
+
+function renameSessionSubmit() {
+    const newName = document.getElementById('newSessionName').value.trim();
+    if (!newName) return;
+    
+    fetch(`/api/sessions/${currentSessionId}/rename`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: newName })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            alert('Error: ' + data.error);
+            return;
+        }
+        
+        bootstrap.Modal.getInstance(document.getElementById('renameSessionModal')).hide();
+        loadSessions();
+    })
+    .catch(error => {
+        alert('Error renaming session: ' + error.message);
+    });
+}
+
+function deleteSession(sessionId) {
+    if (!confirm(`Are you sure you want to delete session "${sessionId}"?`)) {
+        return;
+    }
+    
+    fetch(`/api/sessions/${sessionId}`, {
+        method: 'DELETE'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            alert('Error: ' + data.error);
+            return;
+        }
+        
+        loadSessions();
+    })
+    .catch(error => {
+        alert('Error deleting session: ' + error.message);
+    });
+}
+
+function createNewSession() {
+    const modal = new bootstrap.Modal(document.getElementById('newSessionModal'));
+    document.getElementById('systemPrompt').value = '';
+    modal.show();
+}
+
+function createNewSessionSubmit() {
+    const systemPrompt = document.getElementById('systemPrompt').value.trim();
+    
+    fetch('/api/sessions/new', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+            system_prompt: systemPrompt
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            alert('Error: ' + data.error);
+            return;
+        }
+        
+        bootstrap.Modal.getInstance(document.getElementById('newSessionModal')).hide();
+        loadSessions();
+        
+        // Redirect to chat page
+        window.location.href = `/chat/${data.session_id}`;
+    })
+    .catch(error => {
+        alert('Error creating session: ' + error.message);
+    });
+}
+</script>
+{% endblock %}
