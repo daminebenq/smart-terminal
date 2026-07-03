@@ -2,12 +2,39 @@
 
 AI-powered CLI that turns natural-language instructions into shell commands with risk assessment, web search with AI-synthesized answers, and an agentic loop that can diagnose your system, research solutions, and execute fixes — all with human approval.
 
+## 🚀 New: Native macOS App
+
+Smart Terminal now includes a **native macOS application** with WebView integration, auto-startup, and local domain support!
+
+### Quick Install (macOS)
+
+```bash
+# Clone and install native app
+git clone https://github.com/daminebenq/smart-terminal.git
+cd smart-terminal/SmartTerminalApp
+./install.sh
+
+# Access at: http://smartterminal:5001
+# Auto-starts with your Mac 🚀
+```
+
+**Features:**
+- 🖥️ Native SwiftUI interface
+- 🔄 Auto-startup with system
+- 📍 Menu bar integration
+- 🌐 Local domain 'smartterminal'
+- 🔒 Sandboxed and secure
+- 📱 Responsive web interface
+
 ## Quick Start
 
 ```bash
 pip3 install -r requirements.txt
 smart-term configure        # first-run setup wizard
 smart-term 'update nodejs'  # go
+
+# Or use the web interface
+make web-ui                  # starts web UI at http://localhost:5001
 ```
 
 ## First-Run Setup
@@ -206,6 +233,40 @@ Additional toggles available via `.env` or SettingsManager:
 - `WEB_MIN_INTERVAL` — minimum seconds between web requests (default: 0.5)
 - `WIKI_CACHE_TTL` — Wikipedia cache TTL in seconds (default: 86400)
 
+## Web UI
+
+Smart Terminal now includes a web-based interface for managing conversations:
+
+```bash
+# Start the web UI
+./start_web_ui.sh
+# or
+python3 web_app.py
+```
+
+The web UI provides:
+- **Dashboard**: View all saved conversations with search capabilities
+- **Chat Interface**: Interactive chat for each conversation
+- **Session Management**: Create, rename, delete, and export conversations
+- **Real-time Messaging**: Send messages and get responses from the AI
+- **Export to Markdown**: Download conversations as formatted markdown files
+
+### Web UI Features
+- 🎨 Modern, responsive interface with Bootstrap
+- 🔍 Search conversations by content
+- 💬 Interactive chat interface with syntax highlighting
+- 📱 Mobile-friendly design
+- 🔄 Real-time message sending
+- 📊 Token usage tracking
+- 🗂️ Session organization and management
+
+### Web UI API Endpoints
+- `/api/sessions` - List all conversations
+- `/api/sessions/<id>` - Get specific conversation
+- `/api/chat/<id>/message` - Send a message
+- `/api/sessions/new` - Create new conversation
+- `/api/sessions/<id>/export` - Export conversation as markdown
+
 ## Project Structure
 
 ```
@@ -214,9 +275,20 @@ smart_terminal/
   settings.py    — settings manager with JSON persistence
   setup.py       — first-run setup wizard and config management
   agents/        — built-in agent templates (diagnose, explain, fix, plan)
+  conversation.py — conversation persistence and management
+  chat.py        — CLI chat REPL
 cli.py           — CLI entrypoint (single-shot and REPL)
+web_app.py       — Flask web application for conversation management
+templates/       — HTML templates for web UI
+  base.html      — base template
+  index.html     — dashboard page
+  chat.html      — chat interface
+static/          — CSS and JavaScript assets
+  style.css      — custom styles
+  app.js         — JavaScript utilities
 smart-term       — wrapper script
 st               — compact launcher
+start_web_ui.sh  — web UI launcher script
 tests/           — pytest test suite
 ```
 
