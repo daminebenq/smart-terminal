@@ -53,7 +53,7 @@ except Exception:
     webdriver = None
     HAVE_SELENIUM = False
 
-LOG_PATH = os.path.join(os.getcwd(), 'logs')
+LOG_PATH = os.path.join(os.getenv('XDG_DATA_HOME', os.path.join(os.path.expanduser('~'), '.local', 'share')), 'smart-terminal', 'logs')
 os.makedirs(LOG_PATH, exist_ok=True)
 logging.basicConfig(filename=os.path.join(LOG_PATH, 'smart-terminal.log'), level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(message)s')
