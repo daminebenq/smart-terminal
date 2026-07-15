@@ -569,7 +569,9 @@ User question: {instruction}
             "What shell commands should be run FIRST to check the current system state "
             "before taking any action? Output ONLY a JSON array of short diagnostic commands. "
             'Example: ["node --version", "which node"]\n'
-            "Keep it to 1-5 commands maximum. Output ONLY the JSON array, nothing else."
+            "Keep it to 1-5 commands maximum. Prefer targeted, bounded commands; "
+            "avoid recursive or whole-filesystem scans (no \"ls -R /\", \"find /\", \"ls -R\" at root). "
+            "Output ONLY the JSON array, nothing else."
         )
         diag_resp = self._call_ollama(diag_prompt)
         diag_commands = self._parse_json_array(diag_resp)
@@ -589,6 +591,8 @@ User question: {instruction}
                         capture_output=True, text=True, timeout=15
                     )
                     output = (res.stdout + res.stderr).strip()
+                    if len(output) > 2000:
+                        output = output[:2000] + f"\n... (truncated; {len(output)} chars total)"
                     diag_output[cmd] = output or '(no output)'
                     print(f'  $ {cmd}  →  {output[:120]}')
                 except subprocess.TimeoutExpired:
