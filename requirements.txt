@@ -1,10 +1,18 @@
+# Core
 requests
 prompt_toolkit
 python-dotenv
+rich
+# Web search / fetch (standard profile)
 ddgs
 diskcache
 beautifulsoup4
 trafilatura
+# Optional: browser scraping (install.sh --with-browser)
 playwright
 selenium
+# Optional: web UI (install.sh --with-web)
+flask
+flask-cors
+# Dev
 pytest

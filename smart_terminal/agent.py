@@ -11,6 +11,7 @@ import subprocess
 import platform
 from typing import List
 from smart_terminal.settings import SettingsManager
+from smart_terminal import providers
 import shutil
 try:
     from ddgs import DDGS
@@ -54,7 +55,13 @@ except Exception:
     HAVE_SELENIUM = False
 
 LOG_PATH = os.path.join(os.getenv('XDG_DATA_HOME', os.path.join(os.path.expanduser('~'), '.local', 'share')), 'smart-terminal', 'logs')
-os.makedirs(LOG_PATH, exist_ok=True)
+try:
+    os.makedirs(LOG_PATH, exist_ok=True)
+except OSError:
+    # e.g. ~/.local is a dangling symlink; never crash just because logs can't be written
+    import tempfile
+    LOG_PATH = os.path.join(tempfile.gettempdir(), 'smart-terminal', 'logs')
+    os.makedirs(LOG_PATH, exist_ok=True)
 logging.basicConfig(filename=os.path.join(LOG_PATH, 'smart-terminal.log'), level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(message)s')
 
@@ -64,10 +71,12 @@ class TerminalAgent:
         self.api_base = api_base.rstrip('/')
         self.model = model
         self.api_key = os.getenv('OLLAMA_API_KEY')
+        self.provider = providers.detect_provider(self.api_base)
         # load settings for dry-run and other toggles
         try:
             ss = SettingsManager()
             self.settings = ss
+            self.api_key = self.api_key or ss.get('OLLAMA_API_KEY') or None
             self.dry_run = ss.get('DRY_RUN') in (True, 'true', 'True', '1', 'yes')
             self.auto_approve_zero_risk = ss.get('AUTO_APPROVE_ZERO_RISK', 'true').lower() in ('1','true','yes')
             try:
@@ -109,7 +118,12 @@ class TerminalAgent:
 
         # cache backend: prefer diskcache for bounded, efficient on-disk cache; fall back to small JSON cache
         cache_dir = Path(os.getenv('XDG_CACHE_HOME', os.path.join(os.path.expanduser('~'), '.cache')))/'smart-terminal'
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            import tempfile
+            cache_dir = Path(tempfile.gettempdir()) / 'smart-terminal-cache'
+            cache_dir.mkdir(parents=True, exist_ok=True)
         self._wiki_ttl = int(self.settings.get('WIKI_CACHE_TTL') or os.getenv('WIKI_CACHE_TTL') or 60*60*24)
         if HAVE_DISKCACHE:
             try:
@@ -195,9 +209,8 @@ class TerminalAgent:
 
         risk = self._assess_risk(commands)
         # Present concise command list and risk score
-        for i, c in enumerate(commands, 1):
-            print(f'[{i}] {c}')
-        print(f'Risk score: {risk}/100')
+        from smart_terminal.ui import command_box
+        command_box(commands, 'Proposed commands', risk)
 
         # fast-path: auto-approve trivial/zero-risk commands for a snappy experience
         if risk == 0 and self.auto_approve_zero_risk:
@@ -237,6 +250,15 @@ User instruction: {instruction}
         )
 
     def _call_ollama(self, prompt: str) -> str:
+        if getattr(self, 'provider', providers.OLLAMA) != providers.OLLAMA:
+            try:
+                return providers.chat(self.provider, self.session, self.api_base, self.api_key or '',
+                                      self.model, [{'role': 'user', 'content': prompt}], stream=False,
+                                      timeout=120)
+            except Exception as e:
+                logging.exception('Model call failed')
+                print('Error calling model API:', e)
+                return ''
         url = f"{self.api_base}/api/generate"
         payload = {
             "model": self.model,
@@ -429,6 +451,10 @@ User instruction: {instruction}
             logging.exception('Error clearing cache')
             print('Error clearing cache:', e)
 
+    def list_models(self) -> list:
+        """Return model names available from the configured provider."""
+        return providers.list_models(self.provider, self.session, self.api_base, self.api_key or '')
+
     def chat(self, instruction: str) -> str:
         """Ask the model a question and return the plain-text answer (no execution)."""
         prompt = (
@@ -451,6 +477,14 @@ User question: {instruction}
 
         Returns the full assistant response text, or '' on failure.
         """
+        if getattr(self, 'provider', providers.OLLAMA) != providers.OLLAMA:
+            try:
+                return providers.chat(self.provider, self.session, self.api_base, self.api_key or '',
+                                      self.model, messages, stream=stream, on_token=on_token)
+            except Exception as e:
+                logging.exception('chat_with_history failed')
+                print(f'\nError calling model: {e}')
+                return ''
         url = f"{self.api_base}/api/chat"
         payload = {
             "model": self.model,
@@ -636,12 +670,9 @@ User question: {instruction}
             return
 
         # ── Step 6: Show commands and ask for confirmation ──
-        print(f'\n{self._COLOR_HDR}Proposed commands:{self._COLOR_RESET}')
-        for i, c in enumerate(commands, 1):
-            print(f'  [{i}] {c}')
-
         risk = self._assess_risk(commands)
-        print(f'  Risk score: {risk}/100')
+        from smart_terminal.ui import command_box
+        command_box(commands, 'Proposed commands', risk)
 
         # Check for OS compatibility issues
         issues = self._validate_commands_against_os(commands)
@@ -650,12 +681,15 @@ User question: {instruction}
             for issue in issues:
                 print(f'  - {issue}')
 
-        print(f'\nApply these changes? [y/N] ', end='')
-        sys.stdout.flush()
-        try:
-            ans = input().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = ''
+        if os.getenv('AUTO_APPROVE_ALL', 'false').lower() == 'true':
+            ans = 'y'
+        else:
+            print(f'\nApply these changes? [y/N] ', end='')
+            sys.stdout.flush()
+            try:
+                ans = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = ''
         if ans not in ('y', 'yes'):
             print('Aborted.')
             return
@@ -1623,7 +1657,9 @@ User question: {instruction}
                     logging.error('Sandbox requested but docker not found')
                     return
                 # construct docker run command; mount current working dir as /workspace
-                docker_cmd = f"docker run --rm -v {os.getcwd()}:/workspace -w /workspace {self.sandbox_image} bash -lc \"{c}\""
+                import shlex as _shlex
+                docker_cmd = (f"docker run --rm -v {_shlex.quote(os.getcwd())}:/workspace -w /workspace "
+                              f"{_shlex.quote(self.sandbox_image)} bash -lc {_shlex.quote(c)}")
                 print('[sandbox] Running in container:', self.sandbox_image)
                 logging.info('Sandbox execute: %s', docker_cmd)
                 try:

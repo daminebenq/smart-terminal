@@ -2,50 +2,82 @@
 
 AI-powered CLI that turns natural-language instructions into shell commands with risk assessment, web search with AI-synthesized answers, and an agentic loop that can diagnose your system, research solutions, and execute fixes — all with human approval.
 
-## 🚀 New: Native macOS App
-
-Smart Terminal now includes a **native macOS application** with WebView integration, auto-startup, and local domain support!
-
-### Quick Install (macOS)
+## Install (one command)
 
 ```bash
-# Clone and install native app
-git clone https://github.com/daminebenq/smart-terminal.git
-cd smart-terminal/SmartTerminalApp
-./install.sh
-
-# Access at: http://smartterminal:5001
-# Auto-starts with your Mac 🚀
+curl -fsSL https://raw.githubusercontent.com/daminebenq/smart-terminal/main/install.sh | bash
 ```
 
-**Features:**
-- 🖥️ Native SwiftUI interface
-- 🔄 Auto-startup with system
-- 📍 Menu bar integration
-- 🌐 Local domain 'smartterminal'
-- 🔒 Sandboxed and secure
-- 📱 Responsive web interface
+Or from a checkout: `./install.sh`. The installer:
 
-## Quick Start
+- finds Python 3.9+ and builds a private virtualenv (no system packages touched, PEP 668 safe)
+- installs `smart-term`, `st`, `term`, `do`, `web_search`, `web_fetch`, `web_scrape` into `~/.local/bin`
+- adds tab completion, a **Ctrl+G** widget and an `ai` helper for zsh, bash and fish
+- runs the setup wizard (or configures non-interactively from flags)
+
+Every option is a flag on the same script:
+
+| Option | What it does |
+|---|---|
+| `--minimal` / `--standard` / `--full` | Core only · core + web search (default) · everything |
+| `--with-web` | Flask web UI (`make web-ui`) |
+| `--with-browser` | Playwright + Selenium, downloads Chromium |
+| `--with-dev` | pytest |
+| `--macos-app [--launch-agent]` | Build the native macOS app (optionally start at login) |
+| `--system` | Launchers in `/usr/local/bin` (sudo if needed) |
+| `--dir DIR` / `--bin-dir DIR` | Code location / launcher location |
+| `--python PATH` · `--branch` · `--repo` | Interpreter and source to use |
+| `--provider P --model M [--api-url U]` | Configure without prompts; key from `$SMART_TERM_API_KEY` |
+| `--configure` / `--skip-config` | Force the wizard / skip configuration |
+| `--no-shell-integration` · `--no-aliases` | Skip rc-file hooks · only install `smart-term` and `st` |
+| `--update` · `--uninstall [--purge]` | Upgrade in place · remove (and optionally delete config/sessions) |
+| `-y` · `-q` · `-h` | Non-interactive · quiet · help |
+
+Examples:
 
 ```bash
-pip3 install -r requirements.txt
-smart-term configure        # first-run setup wizard
-smart-term 'update nodejs'  # go
+curl -fsSL .../install.sh | bash -s -- --full
+SMART_TERM_API_KEY=sk-... ./install.sh --provider openai --model gpt-4o-mini -y
+./install.sh --provider ollama --model llama3.2:3b -y
+./install.sh --uninstall --purge
+```
 
-# Or use the web interface
-make web-ui                  # starts web UI at http://localhost:5001
+Shell rc files get a single marked block (`# >>> smart-terminal >>>`) that `--uninstall` removes cleanly.
+Re-running the installer is safe.
+
+## What it feels like
+
+```
+~/code/api  main ✗1
+❯ !npm test                       # run any shell command; cd persists
+  ↳ exit 1 · 4.2s  (type /fix to let the AI repair it)
+❯ /fix                            # AI reads the failing command + output
+● The test runner can't find jest. Install it:
+╭─ Commands found ─────────────────────────────╮
+│ [1] npm i -D jest                            │
+╰──────────────────────────────────────────────╯
+  [y] run all  [n] skip  [e] edit  [#] single  →
+❯ review @src/server.ts for bugs  # @file attaches file contents
+```
+
+From your normal shell:
+
+```bash
+smart-term ask "how do I undo the last git commit"
+git diff | smart-term ask "write a commit message"     # pipes work
+smart-term explain "tar -xzvf a.tgz -C /tmp"
+smart-term fix npm run build        # runs it; on failure proposes a fix
+smart-term doctor                   # config, connectivity, deps
+# type "find files bigger than 1GB here" at the prompt, press Ctrl+G → real command
 ```
 
 ## First-Run Setup
 
-On first use, Smart Terminal requires a one-time configuration. Run any command or explicitly:
+The installer runs the wizard for you. To change settings later:
 
 ```bash
-smart-term configure
+smart-term reconfigure
 ```
-
-The setup wizard lets you pick a provider and model:
 
 | # | Provider | Default API URL |
 |---|----------|----------------|
@@ -53,159 +85,73 @@ The setup wizard lets you pick a provider and model:
 | 2 | OpenAI | `https://api.openai.com/v1` |
 | 3 | Anthropic (Claude) | `https://api.anthropic.com` |
 | 4 | Groq | `https://api.groq.com/openai/v1` |
-| 5 | Custom / Self-hosted | (you provide the URL) |
+| 5 | Custom / Self-hosted | (you provide the URL; OpenAI-compatible if it ends in `/v1`) |
 
-Configuration is saved at `~/.smart-terminal-config/config.json` and locked (immutable flag) to prevent accidental deletion.
-
-To change settings later:
-
-```bash
-smart-term reconfigure
-```
+All five providers are supported end to end (chat, streaming, `models`). Configuration is saved at
+`~/.smart-terminal-config/config.json` and locked with an immutable flag.
 
 ## Commands
 
-### `term` — Natural-language → shell commands
+```
+smart-term [options] [command] [args...]
 
-Describe what you want in plain English. The agent proposes commands, shows a risk score, and waits for `[y/N]` approval before executing.
+  (none) | chat | resume   Interactive chat
+  ask <question>           One-shot answer (reads piped stdin)
+  term <instruction>       Natural language → shell commands, with approval
+  do <instruction>         Same, auto-approve if AUTO_APPROVE_ALL / -y
+  explain <command>        Explain a shell command
+  suggest <request>        Print one shell command (powers Ctrl+G)
+  fix <command>            Run a command, propose a fix if it fails
+  web_search | web_fetch | web_scrape
+  agent <template> <q>     diagnose · explain · fix · plan · agent-manager
+  models · sessions · doctor · configure · reconfigure
+  completion <bash|zsh|fish> · update · uninstall · version
+  <anything else>          Smart instruction: diagnose → research → plan → confirm
 
-```bash
-smart-term term install htop and run it
-term install the latest version of python
+Options: -m/--model NAME  -y/--yes  -n/--dry-run  --sandbox  --no-color  --clear-cache  -v  -h
 ```
 
-### `do` — Auto-approve mode
+### Smart instructions (default)
 
-Same as `term` but with auto-approval enabled for low-risk commands.
+Any input that doesn't match a command triggers the agentic loop:
 
-```bash
-smart-term do list all docker containers
-```
-
-### Smart instructions (default fallback)
-
-Any input that doesn't match a known command triggers the **agentic instruction handler** — a multi-step loop:
-
-1. **Diagnose** — asks the LLM for diagnostic shell commands, runs them, captures output
-2. **Research** — gathers web context (Wikipedia + DuckDuckGo) for the latest info
-3. **Plan** — LLM synthesizes a status report and proposes exact shell commands
-4. **Confirm** — shows proposed commands with risk score, waits for `[y/N]`
-5. **Execute** — runs commands only after approval
+1. **Diagnose**: the LLM proposes read-only checks, which run and are captured
+2. **Research**: Wikipedia + DuckDuckGo context
+3. **Plan**: status report plus exact commands
+4. **Confirm**: commands shown in a box with a risk badge, `[y/N]`
+5. **Execute**: only after approval
 
 ```bash
 smart-term update nodejs
-smart-term check disk space
 smart-term is my firewall configured correctly
 ```
 
-### `web_search` — AI-synthesized web answers
-
-Searches Wikipedia and DuckDuckGo, fetches and filters content from top results, then asks the LLM to synthesize a clean, direct answer.
-
-```bash
-web_search how many egyptian pyramids are there
-web_search what is quantum computing
-```
-
-### `web_fetch` — Fetch and extract page content
-
-Downloads a URL and extracts the main text content using trafilatura/BeautifulSoup.
-
-```bash
-web_fetch https://example.com/article
-```
-
-### `web_scrape` — Browser-based scraping
-
-Uses Playwright or Selenium to scrape JavaScript-heavy pages.
-
-```bash
-web_scrape https://example.com/spa-page
-```
-
-### `agent` — Run agent templates
-
-Runs a built-in agent template (diagnose, explain, fix, plan, or agent-manager) against a question.
-
-```bash
-smart-term agent diagnose why is my API returning 500
-smart-term agent explain what does this cron expression mean
-smart-term agent fix the build is failing with error X
-smart-term agent plan migrate from MySQL to PostgreSQL
-```
-
-### `configure` / `reconfigure`
-
-Works from any command position:
-
-```bash
-smart-term configure
-term configure
-web_search reconfigure
-```
-
-## Installation
-
-### Dependencies
-
-```bash
-pip3 install -r requirements.txt
-```
-
-Core dependencies: `requests`, `prompt_toolkit`, `python-dotenv`, `ddgs`, `diskcache`, `beautifulsoup4`, `trafilatura`
-
-Optional (for browser-based scraping): `playwright`, `selenium`
-
-Minimal install (no web features):
-
-```bash
-pip3 install requests prompt_toolkit python-dotenv
-```
-
-### Wrappers
-
-Install convenience commands to `/usr/local/bin`:
-
-```bash
-sudo ./install_smart_term.sh
-```
-
-This creates: `smart-term`, `term`, `do`, `web_search`, `web_fetch`, `web_scrape`.
-
-The `st` wrapper provides a compact launcher:
-
-```bash
-st                                # interactive REPL
-st web_search how old is Twitter
-st term install htop
-st update nodejs                  # smart instruction (default)
-```
-
-### Optional: zsh bang widget
-
-Intercept `!`-prefixed lines at your zsh prompt:
-
-```bash
-bash install_bang_widget.sh
-source ~/.zshrc
-```
-
-> **Note:** Some zsh configurations expand `!` for history, causing `event not found` errors. The installed wrappers are more reliable.
-
 ## Interactive Mode
 
-Run without arguments for an interactive REPL:
+`smart-term` with no arguments opens the chat REPL:
+
+- **Prompt** shows the working directory, git branch and last exit code
+- **`!cmd`** runs a shell command; `cd` persists; editors/pagers get the real TTY
+- **`/fix`** sends the last failing command and its output to the model
+- **`@path`** attaches a file (Tab completes paths)
+- **Commands in replies** are detected and offered: `[y]` all, `[n]`, `[e]` edit, `[#]` one
+- Fuzzy **Tab** completion for `/commands`, grey **history suggestions** (→ or Ctrl+E to accept)
+- Bottom toolbar with session, context usage, model and cwd
+- Long-term memory and automatic context compaction
+
+Slash commands: `/help /new /continue /clear /compact /history /tokens /sessions /load /save /rename
+/delete /export /memory /search /remember /pin /unpin /forget /forget-all /models /model /system
+/reset /exec /run /cd /pwd /fix /explain /retry /undo /copy /md /stats /doctor /config /version /exit`
+
+Keys: `Alt+Enter`/`Ctrl+J` newline · `Ctrl+L` clear · `Ctrl+R` history search · `Ctrl+D` exit
+
+Set `NO_COLOR=1` to disable colours and `SMART_TERM_NO_BANNER=1` to hide the banner.
+
+## Native macOS App
 
 ```bash
-smart-term
+./install.sh --macos-app --launch-agent     # builds SmartTerminalApp, serves http://smartterminal:5001
 ```
-
-Shortcuts in interactive mode:
-- **Ctrl+P** — toggle auto-approve for low-risk commands
-- **Ctrl+O** — toggle auto-approve for all commands
-- **Ctrl+C** — exit gracefully
-
-Meta commands: `:models`, `:settings`, `:set model <name>`
 
 ## Configuration
 
@@ -235,13 +181,9 @@ Additional toggles available via `.env` or SettingsManager:
 
 ## Web UI
 
-Smart Terminal now includes a web-based interface for managing conversations:
-
 ```bash
-# Start the web UI
-./start_web_ui.sh
-# or
-python3 web_app.py
+./install.sh --with-web     # once
+make web-ui                 # http://localhost:5001
 ```
 
 The web UI provides:
@@ -275,9 +217,14 @@ smart_terminal/
   settings.py    — settings manager with JSON persistence
   setup.py       — first-run setup wizard and config management
   agents/        — built-in agent templates (diagnose, explain, fix, plan)
+  providers.py   — Ollama / OpenAI-compatible / Anthropic adapters
+  shell.py       — REPL shell execution (persistent cwd, output capture)
+  ui.py          — colors, spinner, command boxes
+  doctor.py      — `smart-term doctor` health checks
   conversation.py — conversation persistence and management
   chat.py        — CLI chat REPL
-cli.py           — CLI entrypoint (single-shot and REPL)
+install.sh       — one-shot installer / updater / uninstaller
+cli.py           — CLI entrypoint (subcommands, global options)
 web_app.py       — Flask web application for conversation management
 templates/       — HTML templates for web UI
   base.html      — base template

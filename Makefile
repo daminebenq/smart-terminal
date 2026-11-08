@@ -1,58 +1,38 @@
-# Smart Terminal — Makefile
-#
-# Default target creates a project-local virtualenv at ./.venv and installs
-# requirements there. Works on macOS, Linux (including PEP 668 distros like
-# Kali/Debian/Ubuntu 24+), and WSL without needing --break-system-packages.
+# Smart Terminal — Makefile (thin wrapper around install.sh)
 
-VENV       ?= .venv
-PYTHON     ?= python3
-VENV_PY    := $(VENV)/bin/python
-VENV_PIP   := $(VENV)/bin/pip
+.PHONY: install install-full install-launcher uninstall update test lint run web-ui doctor clean-cache
 
-.PHONY: install venv install-system install-launcher test clean-cache run
+install:            ## standard install (venv + launchers + shell integration)
+	./install.sh
 
-install: venv
-	$(VENV_PIP) install --upgrade pip
-	$(VENV_PIP) install -r requirements.txt
-	@$(MAKE) install-launcher
-	@echo ""
-	@echo "✓ Installed into $(VENV)"
-	@echo "  Run from anywhere: smart-term"
-	@echo "  Or directly:        $(VENV_PY) cli.py"
+install-full:       ## everything: web UI, browser scraping, dev tools
+	./install.sh --full
 
-# Installs the 'smart-term' launcher (and st/term/do/web_* wrappers) onto PATH.
-# Tries /usr/local/bin (sudo if needed), falls back to ~/.local/bin.
-install-launcher:
-	@if [ -x install_smart_term.sh ]; then \
-		echo ""; \
-		echo "Installing 'smart-term' launcher onto PATH ..."; \
-		./install_smart_term.sh || echo "  (launcher install skipped — run ./install_smart_term.sh manually if needed)"; \
-	else \
-		echo "install_smart_term.sh not found or not executable; skipping launcher install"; \
-	fi
+install-launcher:   ## (re)write launchers only, no config prompt
+	./install.sh --skip-config -y
 
-venv:
-	@if [ ! -x "$(VENV_PY)" ]; then \
-		echo "Creating virtualenv at $(VENV) ..."; \
-		$(PYTHON) -m venv $(VENV) || { \
-			echo ""; \
-			echo "venv creation failed. On Debian/Kali/Ubuntu install:"; \
-			echo "  sudo apt install python3-venv"; \
-			exit 1; \
-		}; \
-	fi
+uninstall:
+	./install.sh --uninstall
 
-# Escape hatch for users who explicitly want a system-wide install on
-# externally-managed Python (PEP 668). Use at your own risk.
-install-system:
-	$(PYTHON) -m pip install --break-system-packages -r requirements.txt
+update:
+	./install.sh --update
 
-test: venv
-	$(VENV_PIP) install -r requirements.txt >/dev/null
-	PYTHONPATH=$$(pwd) $(VENV_PY) -m pytest -q
+test:
+	@[ -x .venv/bin/pytest ] || ./install.sh --with-dev --skip-config --no-shell-integration -y -q
+	PYTHONPATH=$$(pwd) .venv/bin/python -m pytest -q
 
-run: venv
-	PYTHONPATH=$$(pwd) $(VENV_PY) cli.py
+lint:
+	shellcheck -S warning install.sh smart-term st
+
+run:
+	./smart-term
+
+web-ui:
+	@.venv/bin/python -c "import flask" 2>/dev/null || ./install.sh --with-web --skip-config -y -q
+	PYTHONPATH=$$(pwd) .venv/bin/python web_app.py
+
+doctor:
+	./smart-term doctor
 
 clean-cache:
-	$(VENV_PY) -c "from smart_terminal.agent import TerminalAgent; from smart_terminal.settings import SettingsManager; s=SettingsManager(); a=TerminalAgent(api_base=s.get('OLLAMA_API_BASE') or '', model=s.get('OLLAMA_MODEL') or ''); a.clear_cache()"
+	./smart-term --clear-cache

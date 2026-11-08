@@ -187,3 +187,33 @@ def run_reconfigure():
         _unlock_config()
         print('\033[1;33mReconfiguring Smart Terminal...\033[0m')
     run_setup()
+
+
+def configure_noninteractive(provider_key: str, api_url: str, model: str, api_token: str = '') -> dict:
+    """Write config without prompting (used by install.sh --provider/--model).
+
+    Raises ValueError on bad input.
+    """
+    key = (provider_key or 'ollama').strip().lower()
+    provider = next((p for p in PROVIDERS if p['key'] == key), None)
+    if provider is None:
+        raise ValueError(f"unknown provider '{provider_key}' "
+                         f"(choose: {', '.join(p['key'] for p in PROVIDERS)})")
+    url = (api_url or provider['default_url']).strip().rstrip('/')
+    if not url:
+        raise ValueError('--api-url is required for a custom provider')
+    if not url.startswith(('http://', 'https://')):
+        raise ValueError(f'API URL must start with http:// or https:// (got {url})')
+    if not model:
+        raise ValueError('model is required')
+    if provider['token_required'] and not api_token:
+        raise ValueError(f"{provider['name']} needs an API key: set SMART_TERM_API_KEY")
+    cfg = {
+        'provider': provider['key'],
+        'provider_name': provider['name'],
+        'api_url': url,
+        'model': model.strip(),
+        'api_token': api_token or '',
+    }
+    save_global_config(cfg)
+    return cfg

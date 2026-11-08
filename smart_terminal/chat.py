@@ -13,6 +13,10 @@ Features:
                   /load /save /rename /delete /export /model /system /reset
                   /exec /memory /search /remember /pin /unpin /forget /forget-all
                   /continue /exit /quit
+- Shell passthrough: `!<cmd>` runs a command directly (cd persists),
+  /fix sends the last failing command + output to the model
+- `@path/to/file` in a message attaches that file's contents
+- Prompt shows cwd, git branch and last exit code (fish/zsh style)
 """
 
 from __future__ import annotations
@@ -29,15 +33,20 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.patch_stdout import patch_stdout
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import (WordCompleter, PathCompleter, FuzzyCompleter,
+                                       Completer, Completion)
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.key_binding import KeyBindings
 
 from smart_terminal.platform_compat import user_shell_argv
+from smart_terminal import shell as _shell
+from smart_terminal.ui import color_enabled as _color_enabled
 
 from smart_terminal.agent import TerminalAgent
 from smart_terminal.conversation import Conversation, SESSIONS_DIR
 
 # ── ANSI palette ──────────────────────────────────────────────────────────────
+_COL = _color_enabled()
 C_HDR   = '\033[1;34m'   # bold blue
 C_OK    = '\033[1;32m'   # bold green
 C_WARN  = '\033[1;33m'   # bold yellow
@@ -48,6 +57,11 @@ C_USER  = '\033[1;36m'   # bold cyan  (user prompt)
 C_AI    = '\033[1;35m'   # bold magenta (AI bullet)
 C_CODE  = '\033[0;32m'   # dark green (inline code)
 C_BOLD  = '\033[1m'
+if not _COL:  # honour NO_COLOR / non-TTY output
+    C_HDR = C_OK = C_WARN = C_ERR = C_DIM = C_RESET = C_USER = C_AI = C_CODE = C_BOLD = ''
+
+# Shared shell state for the REPL: persistent cwd, last exit code, history.
+_STATE = _shell.ShellState()
 
 # ── Slash-command list (drives Tab completion) ─────────────────────────────────
 _SLASH_CMDS = [
@@ -56,6 +70,8 @@ _SLASH_CMDS = [
     '/model', '/models', '/system', '/reset', '/exec', '/exit', '/quit',
     '/continue', '/memory', '/search', '/remember', '/pin', '/unpin',
     '/forget', '/forget-all',
+    '/fix', '/explain', '/run', '/cd', '/pwd', '/copy', '/retry', '/undo',
+    '/stats', '/doctor', '/config', '/version', '/clear-screen', '/md',
 ]
 
 HELP_TEXT = f"""{C_HDR}Smart Terminal — Chat Mode{C_RESET}
@@ -92,12 +108,30 @@ AND persistent facts from prior sessions (long-term memory).
   /system <text>        Replace the system prompt
   /reset                Reset system prompt to default
 
+{C_HDR}Shell:{C_RESET}
+  !<command>            Run a shell command directly (e.g. !git status)
+  /run <command>        Same as !<command>
+  /cd <dir> · /pwd      Change / show the working directory (persists)
+  /fix                  Ask the AI to fix the last failing command
+  /explain <command>    Explain what a shell command does
+  @path/to/file         Attach a file's contents to your message
+
 {C_HDR}Actions:{C_RESET}
   /exec                 Extract shell commands from last response & run them
+  /retry                Re-send your last message
+  /undo                 Remove the last user/assistant exchange
+  /copy                 Copy the last response to the clipboard
+  /md                   Re-render the last response as Markdown (needs rich)
+  /stats                Session statistics
+  /doctor               Check config, connectivity and dependencies
+  /config               Show active configuration (secrets masked)
+  /version              Show version
   /exit or /quit        Exit (auto-saves)
 
 {C_HDR}Keyboard:{C_RESET}
-  Tab                  Complete slash commands
+  Tab                  Complete /commands (fuzzy), paths after ! and @
+  →  / Ctrl+E          Accept the grey history suggestion
+  Ctrl+R               Reverse-search input history
   Alt+Enter / Ctrl+J   Add a newline (multi-line input)
   Ctrl+L               Clear screen
   Ctrl+C               Cancel current input line
@@ -204,14 +238,24 @@ def _offer_run_commands(cmds: list[str]) -> None:
 
     print()
     for c in to_run:
-        print(f'  {C_DIM}$ {c}{C_RESET}')
-        try:
-            result = subprocess.run(user_shell_argv(c), check=False)
-            if result.returncode != 0:
-                print(f'  {C_WARN}↳ exit {result.returncode}{C_RESET}')
-        except Exception as exc:
-            print(f'  {C_WARN}↳ error: {exc}{C_RESET}')
+        _run_shell(c)
     print()
+
+
+def _run_shell(c: str) -> '_shell.ShellResult':
+    """Run one command in the REPL's shell state and print a status line."""
+    print(f'  {C_DIM}$ {c}{C_RESET}')
+    try:
+        res = _shell.run(c, _STATE)
+    except Exception as exc:
+        print(f'  {C_WARN}↳ error: {exc}{C_RESET}')
+        return _shell.ShellResult(c, 1, str(exc))
+    if res.code != 0:
+        hint = '  (type /fix to let the AI repair it)' if res.captured else ''
+        print(f'  {C_ERR}↳ exit {res.code}{C_RESET}{C_DIM} · {res.seconds:.1f}s{hint}{C_RESET}')
+    elif res.seconds >= 2:
+        print(f'  {C_DIM}↳ done in {res.seconds:.1f}s{C_RESET}')
+    return res
 
 
 def _print_status(conv: Conversation, model: str):
@@ -371,26 +415,19 @@ def _handle_slash(cmd: str, agent: TerminalAgent, conv: Conversation,
             print(f"{C_WARN}Save failed: {e}{C_RESET}")
         return None
     if head == '/models':
-        import requests as _req
-        url = f'{agent.api_base}/api/tags'
         try:
-            r = _req.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            models = data.get('models') or []
-            if not models:
-                print(f'{C_DIM}No models returned from {url}{C_RESET}')
-                return None
-            print(f'{C_HDR}Available models at {agent.api_base}:{C_RESET}')
-            for m in models:
-                name = m.get('name', '?')
-                size = m.get('size', 0)
-                size_str = f'{size / 1e9:.1f} GB' if size else ''
-                active = f'  {C_OK}← current{C_RESET}' if name == agent.model else ''
-                print(f'  {C_DIM}•{C_RESET} {name:<40} {C_DIM}{size_str}{C_RESET}{active}')
-            print(f'\n  Use /model <name> to switch.')
+            names = agent.list_models()
         except Exception as exc:
             print(f'{C_WARN}Failed to fetch models: {exc}{C_RESET}')
+            return None
+        if not names:
+            print(f'{C_DIM}No models returned from {agent.api_base}{C_RESET}')
+            return None
+        print(f'{C_HDR}Available models at {agent.api_base}:{C_RESET}')
+        for name in names:
+            active = f'  {C_OK}← current{C_RESET}' if name == agent.model else ''
+            print(f'  {C_DIM}•{C_RESET} {name}{active}')
+        print(f'\n  Use /model <name> to switch.')
         return None
     if head == '/model':
         if not arg:
@@ -594,8 +631,169 @@ def _handle_slash(cmd: str, agent: TerminalAgent, conv: Conversation,
         print(f"{C_OK}✓ Forgot {n} unpinned memories (pinned kept){C_RESET}")
         return None
 
+    if head in ('/run',):
+        if not arg:
+            print(f"{C_WARN}Usage: /run <command>{C_RESET}")
+            return None
+        _run_shell(arg)
+        return None
+
+    if head == '/cd':
+        _shell.try_builtin_cd('cd ' + (arg or '~'), _STATE)
+        print(f"{C_DIM}{_shell.pretty_cwd(_STATE.cwd)}{C_RESET}")
+        return None
+
+    if head == '/pwd':
+        print(_STATE.cwd)
+        return None
+
+    if head == '/clear-screen':
+        print('\033[2J\033[H', end='')
+        return None
+
+    if head == '/copy':
+        text = last_response[-1] if last_response else ''
+        if not text:
+            print(f"{C_DIM}Nothing to copy yet.{C_RESET}")
+            return None
+        if _copy_to_clipboard(text):
+            print(f"{C_OK}✓ Copied {len(text)} chars to clipboard{C_RESET}")
+        else:
+            print(f"{C_WARN}No clipboard tool found (pbcopy / wl-copy / xclip / xsel / clip).{C_RESET}")
+        return None
+
+    if head == '/md':
+        text = last_response[-1] if last_response else ''
+        if not text:
+            print(f"{C_DIM}No response to render.{C_RESET}")
+            return None
+        try:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            Console().print(Markdown(text))
+        except ImportError:
+            print(f"{C_WARN}Install 'rich' for Markdown rendering (pip install rich).{C_RESET}")
+        return None
+
+    if head == '/undo':
+        removed = 0
+        while conv.messages and removed < 2:
+            role = conv.messages[-1].get('role')
+            conv.messages.pop()
+            removed += 1
+            if role == 'user':
+                break
+        print(f"{C_OK}✓ Removed {removed} message(s){C_RESET}")
+        return None
+
+    if head == '/stats':
+        users = sum(1 for m in conv.messages if m.get('role') == 'user')
+        bots = sum(1 for m in conv.messages if m.get('role') == 'assistant')
+        ran = len(_STATE.history)
+        failed = sum(1 for r in _STATE.history if r.code != 0)
+        print(f"{C_HDR}Session stats{C_RESET}")
+        print(f"  session   {conv.session_id}")
+        print(f"  model     {agent.model} ({getattr(agent, 'provider', '?')})")
+        print(f"  messages  {users} you · {bots} assistant")
+        print(f"  tokens    ~{conv.estimate_total_tokens()} / {conv.max_context_tokens}")
+        print(f"  commands  {ran} run · {failed} failed")
+        print(f"  cwd       {_shell.pretty_cwd(_STATE.cwd)}")
+        return None
+
+    if head == '/config':
+        from smart_terminal.settings import SettingsManager
+        print(f"{C_HDR}Active configuration{C_RESET}")
+        print(f"  provider  {getattr(agent, 'provider', '?')}")
+        print(f"  api_base  {agent.api_base}")
+        print(f"  model     {agent.model}")
+        for k, v in SettingsManager().masked().items():
+            if k not in ('OLLAMA_API_BASE', 'OLLAMA_MODEL'):
+                print(f"  {k.lower():<9} {v}")
+        return None
+
+    if head == '/version':
+        from smart_terminal import __version__
+        print(f"smart-terminal {__version__}")
+        return None
+
+    if head == '/doctor':
+        from smart_terminal.doctor import run_doctor
+        run_doctor(agent)
+        return None
+
+    # /fix and /explain and /retry are handled in run_chat (they send messages)
     print(f"{C_WARN}Unknown command: {head}. Type /help.{C_RESET}")
     return None
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    import shutil as _sh
+    for cmd in (['pbcopy'], ['wl-copy'], ['xclip', '-selection', 'clipboard'],
+                ['xsel', '--clipboard', '--input'], ['clip']):
+        if _sh.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text, text=True, check=True)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+_AT_FILE = re.compile(r'(?<![\w/])@((?:~|\.{1,2})?/?[\w.\-/~]+)')
+_MAX_ATTACH = 20000
+
+
+def _expand_file_refs(text: str) -> str:
+    """Attach the contents of any @file references to the message."""
+    blocks = []
+    for m in _AT_FILE.finditer(text):
+        raw = m.group(1)
+        path = os.path.abspath(os.path.join(_STATE.cwd, os.path.expanduser(raw)))
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                body = f.read(_MAX_ATTACH + 1)
+        except OSError:
+            continue
+        if len(body) > _MAX_ATTACH:
+            body = body[:_MAX_ATTACH] + '\n… (truncated)'
+        blocks.append(f"\n\n--- file: {raw} ---\n{body}\n--- end {raw} ---")
+        print(f"{C_DIM}  📎 attached {raw} ({len(body)} chars){C_RESET}")
+    return text + ''.join(blocks)
+
+
+def _fix_prompt(res) -> str:
+    out = (res.output or '').strip()[-4000:] or '(no output captured)'
+    return (f"I ran this command in `{_shell.pretty_cwd(_STATE.cwd)}` and it failed with exit code {res.code}:\n\n"
+            f"```bash\n{res.command}\n```\n\nOutput:\n```\n{out}\n```\n\n"
+            "Explain the cause in one or two sentences, then give the corrected command(s) "
+            "in a ```bash block.")
+
+
+class _ReplCompleter(Completer):
+    """Fuzzy /command completion, path completion after `!`, `/cd`, `/run` and `@`."""
+
+    def __init__(self):
+        self._slash = FuzzyCompleter(WordCompleter(_SLASH_CMDS, sentence=True))
+        self._paths = PathCompleter(expanduser=True,
+                                    get_paths=lambda: [_STATE.cwd])
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if text.startswith('/') and ' ' not in text:
+            yield from self._slash.get_completions(document, complete_event)
+            return
+        word = document.get_word_before_cursor(WORD=True)
+        if word.startswith('@'):
+            from prompt_toolkit.document import Document
+            sub = Document(word[1:], len(word) - 1)
+            yield from self._paths.get_completions(sub, complete_event)
+            return
+        if text.startswith(('!', '/cd ', '/run ')) and ' ' in text.lstrip('!'):
+            from prompt_toolkit.document import Document
+            sub = Document(word, len(word))
+            yield from self._paths.get_completions(sub, complete_event)
 
 
 def run_chat(agent: TerminalAgent, conv: Optional[Conversation] = None,
@@ -623,13 +821,13 @@ def run_chat(agent: TerminalAgent, conv: Optional[Conversation] = None,
 
     # ── Header ────────────────────────────────────────────────────────────────
     model_short = agent.model.split(':')[0]
-    print(f"""
-{C_HDR}╔══════════════════════════════════════════╗
-║     Smart Terminal — Chat Mode           ║
-╚══════════════════════════════════════════╝{C_RESET}
-{C_DIM}Model  : {agent.model}
-Session: {conv.session_id}
-Tip    : Tab completes /commands · Alt+Enter for newline · Ctrl+L clears screen{C_RESET}
+    from smart_terminal import __version__
+    if not os.getenv('SMART_TERM_NO_BANNER'):
+        print(f"""
+{C_AI}   ▄▄▄▄ ▄▄▄▄▄{C_RESET}   {C_BOLD}Smart Terminal{C_RESET} {C_DIM}v{__version__}{C_RESET}
+{C_AI}   ▀▄▄▄   █  {C_RESET}   {C_DIM}model    {C_RESET}{agent.model} {C_DIM}({getattr(agent, 'provider', 'ollama')}){C_RESET}
+{C_AI}   ▄▄▄▀   █  {C_RESET}   {C_DIM}session  {C_RESET}{conv.session_id}
+               {C_DIM}/help commands · !cmd runs shell · @file attaches · /fix repairs failures{C_RESET}
 """)
 
     # ── Prompt-toolkit setup ──────────────────────────────────────────────────
@@ -648,11 +846,16 @@ Tip    : Tab completes /commands · Alt+Enter for newline · Ctrl+L clears scree
         """Alt+Enter / Ctrl+J — insert a literal newline into the input buffer."""
         event.current_buffer.insert_text('\n')
 
-    completer = WordCompleter(
-        _SLASH_CMDS,
-        pattern=re.compile(r'(/\w*)'),
-        sentence=True,
-    )
+    @kb.add('c-e')
+    def _accept_suggestion(event):
+        """Ctrl+E — accept the history auto-suggestion (or go to end of line)."""
+        b = event.current_buffer
+        if b.suggestion:
+            b.insert_text(b.suggestion.text)
+        else:
+            b.cursor_position = len(b.text)
+
+    completer = _ReplCompleter()
 
     # Bottom toolbar — closure captures `conv` by reference so it updates when
     # the session is switched inside the while-loop.
@@ -665,25 +868,39 @@ Tip    : Tab completes /commands · Alt+Enter for newline · Ctrl+L clears scree
         return HTML(
             f'<b><style fg="ansiblue">{sid}</style></b>  '
             f'<style fg="{color}">{bar} {pct}%</style>  '
-            f'<style fg="ansigray">· {model_short}  · /help</style>'
+            f'<style fg="ansigray">· {model_short} · {_shell.pretty_cwd(_STATE.cwd)[-30:]} · /help · !cmd</style>'
         )
 
     pt_session = PromptSession(
         history=FileHistory(history_file),
         completer=completer,
         complete_while_typing=False,   # Tab-only, no distracting pop-up while typing
+        auto_suggest=AutoSuggestFromHistory(),
+        enable_history_search=False,
         key_bindings=kb,
         bottom_toolbar=_toolbar,
         wrap_lines=True,
     )
 
     last_response: list[str] = ['']
+    last_user: list[str] = ['']
+
+    def _prompt_text():
+        cwd = _shell.pretty_cwd(_STATE.cwd)
+        if len(cwd) > 40:
+            cwd = '…' + cwd[-39:]
+        branch = _shell.git_branch(_STATE.cwd)
+        br = f' {C_AI}⎇ {branch}{C_RESET}' if branch and _COL else (f' ({branch})' if branch else '')
+        code = _STATE.last_code
+        st = f' {C_ERR}✗{code}{C_RESET}' if code else ''
+        arrow = C_ERR if code else C_USER
+        return ANSI(f'\n{C_HDR}{cwd}{C_RESET}{br}{st}\n{arrow}❯{C_RESET} ')
 
     while True:
         # ── Prompt ───────────────────────────────────────────────────────────
         try:
             with patch_stdout():
-                user_input = pt_session.prompt(ANSI(f'\n{C_USER}❯{C_RESET} '))
+                user_input = pt_session.prompt(_prompt_text)
         except KeyboardInterrupt:
             print(f"\n{C_DIM}(Ctrl-C to cancel · /exit to quit){C_RESET}")
             continue
@@ -696,8 +913,40 @@ Tip    : Tab completes /commands · Alt+Enter for newline · Ctrl+L clears scree
         if not user_input:
             continue
 
+        # ── Shell passthrough: !cmd ───────────────────────────────────────────
+        if user_input.startswith('!') and len(user_input) > 1:
+            _run_shell(user_input[1:].strip())
+            continue
+
+        # ── Message-producing slash commands ─────────────────────────────────
+        low = user_input.lower()
+        if low == '/fix':
+            failed = _STATE.last_failed()
+            if not failed:
+                print(f"{C_DIM}No failed command in this session.{C_RESET}")
+                continue
+            user_input = _fix_prompt(failed)
+            print(f"{C_DIM}  🔧 asking the AI to fix: {failed.command}{C_RESET}")
+        elif low.startswith('/explain'):
+            what = user_input[len('/explain'):].strip()
+            if not what:
+                print(f"{C_WARN}Usage: /explain <command>{C_RESET}")
+                continue
+            user_input = (f"Explain this shell command piece by piece, briefly, and flag anything risky:\n"
+                          f"```bash\n{what}\n```")
+        elif low == '/retry':
+            if not last_user[0]:
+                print(f"{C_DIM}Nothing to retry.{C_RESET}")
+                continue
+            if conv.messages and conv.messages[-1].get('role') == 'assistant':
+                conv.messages.pop()
+            if conv.messages and conv.messages[-1].get('role') == 'user':
+                conv.messages.pop()
+            user_input = last_user[0]
+            print(f"{C_DIM}  ↻ retrying{C_RESET}")
+
         # ── Slash commands ────────────────────────────────────────────────────
-        if user_input.startswith('/'):
+        elif user_input.startswith('/'):
             try:
                 maybe_new = _handle_slash(user_input, agent, conv, last_response)
                 if maybe_new is not None:
@@ -710,7 +959,8 @@ Tip    : Tab completes /commands · Alt+Enter for newline · Ctrl+L clears scree
         _auto_compact_if_needed(agent, conv)
 
         # ── Stream response ───────────────────────────────────────────────────
-        conv.add_user(user_input)
+        last_user[0] = user_input
+        conv.add_user(_expand_file_refs(user_input))
 
         print()  # blank line before response
 
